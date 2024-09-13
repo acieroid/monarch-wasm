@@ -1,0 +1,18 @@
+packages: interpreter.cabal
+
+source-repository-package
+   type: git
+   location: https://github.com/softwarelanguageslab/maf-hs.git
+   tag: bf8f1061eb7b5e218212cea7bd3f070d2d687558
+   subdir: maf2-syntax maf2-analysis maf2-domains
+
+
+source-repository-package
+   type: git
+   location: https://github.com/bramvdbogaerde/layers-mtl.git
+   tag: 5201fd1814053630f762c382a79e49b7bf14df8f
+
+source-repository-package
+   type: git
+   location: https://github.com/SPY/haskell-wasm
+   tag: 23aef00097039faf240746a64c5f9ac2c90efdf6
