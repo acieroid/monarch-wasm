@@ -25,10 +25,9 @@ source-repository head
 
 library
   exposed-modules:
-      Domain
-      Fixpoint
-      Foo
-      Semantics
+      Analysis.WebAssembly.Domain
+      Analysis.WebAssembly.Fixpoint
+      Analysis.WebAssembly.Semantics
   other-modules:
       Paths_interpreter
   autogen-modules:
