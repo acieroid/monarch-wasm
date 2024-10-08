@@ -3,7 +3,7 @@ module Main (main) where
 
 import System.Environment (getArgs)
 import Language.Wasm as Wasm
-import Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy as LBS
 import Control.Monad.IO.Class
 
 loadFile :: MonadIO m => FilePath -> m (Either String Module)
