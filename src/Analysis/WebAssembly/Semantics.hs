@@ -4,7 +4,8 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 module Analysis.WebAssembly.Semantics (
-  evalFunction, WMonad, WStack, WLocals, WGlobals, WasmModule
+  evalFunction, WMonad, WStack, WLocals, WGlobals, WasmModule,
+  runWithWasmModule, runWithStub
 ) where
 
 import Control.Monad.Join (MonadJoin)
@@ -13,8 +14,10 @@ import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..), WDomain, WAddress)
 import Prelude hiding (drop)
 import Analysis.Monad.Fix (MonadFixpoint)
-import Control.Monad.Layer (MonadLayer (upperM))
-import Analysis.Monad (StoreM)
+import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
+import Analysis.Monad (StoreM, MonadCache)
+import Control.Monad.Reader (ReaderT, runReaderT, ask, MonadReader)
+import Control.Monad.Identity (IdentityT (..), Identity (runIdentity))
 
 -- A reader-like monad to get access to the entire program. Necessary to e.g., access types, jump targets, etc.
 class Monad m => WasmModule m where
@@ -22,6 +25,14 @@ class Monad m => WasmModule m where
 
 instance {-# OVERLAPPABLE #-} (WasmModule m, MonadLayer t) => WasmModule (t m) where
   getModule = upperM getModule
+
+newtype WasmModuleT m a = WasmModuleT (ReaderT Module m a)
+                        deriving (Functor, Applicative, Monad, MonadTrans, MonadLayer, MonadReader Module)
+runWithWasmModule :: Module -> WasmModuleT m a -> m a
+runWithWasmModule r (WasmModuleT m) = runReaderT m r
+
+instance (Monad m) => WasmModule (WasmModuleT m) where
+   getModule = ask
 
 numberOfReturnValues :: WasmModule m => Function -> m Int
 numberOfReturnValues f = do
@@ -59,6 +70,18 @@ class (WValue v, Monad m) => WGlobals m v | m -> v where
 instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t) => WGlobals (t m) v where
   setGlobal i = upperM . setGlobal i
   getGlobal = upperM . getGlobal
+
+
+-- TODO: these are just stub instances for WStack, WGlobals and WLocals
+-- implement these with a suitable instance, perhaps split them up too,
+-- as they might need to be at different locations in the monad stack.
+newtype StubT v m a = StubT { getStubT :: IdentityT m a }
+             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoin)
+instance (WValue v, Monad m) => WStack (StubT v m) v
+instance (WValue v, Monad m) => WLocals (StubT v m) v
+instance (WValue v, Monad m) => WGlobals (StubT v m) v
+runWithStub :: forall v m a . StubT v m a -> m a
+runWithStub = runIdentityT . getStubT
 
 -- We need to access the linear memory (the heap)
 type WLinearMemory m a v = StoreM m a v

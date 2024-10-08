@@ -1,7 +1,7 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 module Analysis.WebAssembly.Fixpoint where
-import Analysis.WebAssembly.Domain (WDomain, WAddress)
-import Analysis.WebAssembly.Semantics (evalFunction, WasmModule, WStack, WLocals, WGlobals)
+import Analysis.WebAssembly.Domain (WDomain, WAddress (..))
+import Analysis.WebAssembly.Semantics (evalFunction, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub)
 import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), StoreM, iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
 import Numeric.Natural (Natural)
 import Control.Monad.Identity
@@ -28,11 +28,11 @@ type AnalysisM m a v = (
   Meetable v,
   WAddress a,
   StoreM m a v,
-  WStack m v,
+  WStack m v, -- TODO: isn't WStack a local effect? should be higher in the stack, maybe also in IntraT? but then it becomes part of the component, ...
   WLocals m v,
   WGlobals m v,
   WasmModule m,
-  MonadFixpoint m Natural [v],
+  -- MonadFixpoint m Natural [v], -- We don't need this in the inter analysis as it is already satisfied by `runFixT`
   MapM (WasmCmp v) (WasmRes v) m, -- functions are mapped to their return stack
   -- XXX: do we need component tracking, if we already know all components statically? (assuming loops are fixed points)
   ComponentTrackingM m (WasmCmp v),
@@ -45,7 +45,7 @@ type WasmRes v = Val (IntraT Identity v) [v]
 
 intra :: forall m a v . AnalysisM m a v => WasmCmp v -> m ()
 intra fidx = runFixT @(IntraT (IntraAnalysisT (WasmCmp v) m) v) (evalFunction @_ @a) fidx
-  & runIntraAnalysis fidx
+           & runIntraAnalysis fidx
 
 inter :: forall m a v . AnalysisM m a v => Module -> m ()
 -- TODO: monarch paper defines inter = lftp intra, but I guess this is missing the entry point, hence, we might prefer the following
@@ -57,18 +57,30 @@ inter m = case start m of
               -- No entry point, no analysis!
               return ()
 
+-- XXX: the problem with keeping the address polymorphic is that transformers 
+-- such as `DependencyTrackingM` might overlap once it is instantiated since 
+-- it could equal `WasmCmp v` for which there already is a transformer on 
+-- the stack, to solve this, I created a concrete address type.
+-- Unfortunately, Haskell does not provide a way to proof type inequality, 
+-- so this problem can only be solved by providing it with a concrete type 
+-- (or at least a type whose tag is already known)
+type Address = () -- TODO: change this to a suitable address representation
+instance WAddress Address where
+  anyAddr = ()
+
 -- Analyze a module, returning:
 -- - the resulting stack for each function
 -- - the linear memory
 -- - TODO: the globals
-analyze :: forall a v . (WDomain a v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map FunctionIndex [v], Map a v)
+analyze :: forall a v . (a ~ Address, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map (WasmCmp v) [v], Map a v)
 analyze m = (returns, store)
-  where (((), store), returns) = inter m
+  where (((), store), returns) = inter @_ @a m
           & runWithStore @(Map a v) @a @v
           & runWithMapping @(WasmCmp v) @(WasmRes v)
-          & runWithDependencyTracking @(WasmCmp v) @v
-          & _ -- TODO: Hole added here to make error more explicit: I get a "• Could not deduce (WorkListM m0 (Natural, ()))", where (Natural, ()) corresponds to WasmCmp v
+          & runWithDependencyTracking @(WasmCmp v) @a
           & runWithDependencyTracking @(WasmCmp v) @(WasmCmp v)
           & runWithComponentTracking @(WasmCmp v)
-          & runWithWorkList @(Set (WasmCmp v))
+          & runWithWorkList @[_] @(WasmCmp v)
+          & runWithWasmModule m
+          & runWithStub
           & runIdentity
