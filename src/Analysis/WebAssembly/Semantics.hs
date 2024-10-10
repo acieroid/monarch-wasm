@@ -134,5 +134,9 @@ evalInstr (TeeLocal i) = do
 evalInstr (GetGlobal i) = getGlobal i >>= push
 evalInstr (SetGlobal i) = pop >>= setGlobal i
 evalInstr (I32Const n) = push (i32 n)
+evalInstr (IBinOp bitSize binOp) = do
+  v1 <- pop
+  v2 <- pop
+  push (iBinOp bitSize binOp v1 v2)
 
 evalInstr i = todo i

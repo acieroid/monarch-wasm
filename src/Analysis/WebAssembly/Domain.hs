@@ -1,4 +1,5 @@
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE InstanceSigs #-}
 module Analysis.WebAssembly.Domain (
   WValue(..),
   WAddress(..),
@@ -10,6 +11,8 @@ import Lattice (Joinable (..), PartialOrder (..), BottomLattice (..))
 import Data.Word (Word32, Word64)
 import Numeric.Natural (Natural)
 import Lattice.Class (Meetable (..))
+import Language.Wasm.Structure (BitSize (..), IBinOp (..))
+import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
 
 class (Show v, Ord v) => WValue v where
   i32 :: Word32 -> v
@@ -18,25 +21,46 @@ class (Show v, Ord v) => WValue v where
   f64 :: Word64 -> v
   func :: Maybe Natural -> v
   extern :: Maybe Natural -> v
+  iBinOp :: BitSize -> IBinOp -> v -> v -> v
+
+-- Implements binary operations on i32/i64
+-- XXX: This does not perfectly follow the WebAssembly semantics, for simplicity.
+concreteiBinOp :: (Bits b, Integral b) => IBinOp -> b -> b -> b
+concreteiBinOp IAdd = (+)
+concreteiBinOp ISub = (-)
+concreteiBinOp IMul = (*)
+concreteiBinOp IDivU = div
+concreteiBinOp IDivS = div
+concreteiBinOp IRemU = rem
+concreteiBinOp IRemS = rem
+concreteiBinOp IAnd = (.&.)
+concreteiBinOp IOr = (.|.)
+concreteiBinOp IXor = xor
+concreteiBinOp IShl = \x y -> shiftL x (fromIntegral y)
+concreteiBinOp IShrU = \x y -> shiftR x (fromIntegral y)
+concreteiBinOp IShrS = \x y -> shiftR x (fromIntegral y)
+concreteiBinOp IRotl = \x y -> rotateL x (fromIntegral y)
+concreteiBinOp IRotr = \x y -> rotateR x (fromIntegral y)
 
 -- Similar to a CP lattice, but without bottom. Isomorphic to Maybe, but we prefer explicit names
 data ConstOrTop a =
-    Constant a
+    Constant !a
   | Top
   deriving (Show, Ord, Eq)
 
 instance Ord a => Joinable (ConstOrTop a) where
+  join :: ConstOrTop a -> ConstOrTop a -> ConstOrTop a
   join v@(Constant x) (Constant y) | x == y = v
   join _ _ = Top
 
 data ConstPropValue =
     Bottom
-  | I32 (ConstOrTop Word32)
-  | I64 (ConstOrTop Word64)
-  | F32 (ConstOrTop Word32)
-  | F64 (ConstOrTop Word64)
-  | Func (ConstOrTop (Maybe Natural))
-  | Extern (ConstOrTop (Maybe Natural))
+  | I32 !(ConstOrTop Word32)
+  | I64 !(ConstOrTop Word64)
+  | F32 !(ConstOrTop Word32)
+  | F64 !(ConstOrTop Word64)
+  | Func !(ConstOrTop (Maybe Natural))
+  | Extern !(ConstOrTop (Maybe Natural))
   deriving (Show, Ord, Eq)
 
 instance WValue ConstPropValue where
@@ -46,6 +70,11 @@ instance WValue ConstPropValue where
   f64 n = F64 (Constant n)
   func n = Func (Constant n)
   extern n = Extern (Constant n)
+  iBinOp BS32 binOp (I32 (Constant x)) (I32 (Constant y)) = I32 (Constant (concreteiBinOp binOp x y))
+  iBinOp BS32 _ (I32 _) (I32 _) = I32 Top
+  iBinOp BS64 binOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiBinOp binOp x y))
+  iBinOp BS32 _ (I64 _) (I64 _) = I64 Top
+  iBinOp _ _ _ _ = error "should never mistype binary operation"
 
 instance Joinable ConstPropValue where
   join (I32 x) (I32 y) = I32 (join x y)
