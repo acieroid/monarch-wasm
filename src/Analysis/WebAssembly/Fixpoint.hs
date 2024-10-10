@@ -1,19 +1,20 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-module Analysis.WebAssembly.Fixpoint where
-import Analysis.WebAssembly.Domain (WDomain, WAddress (..), ConstPropValue, SingleAddress)
+module Analysis.WebAssembly.Fixpoint (
+  analyze,
+  WasmCmp
+  ) where
+import Analysis.WebAssembly.Domain (WDomain, WAddress (..), SingleAddress)
 import Analysis.WebAssembly.Semantics (evalFunction, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub)
 import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), StoreM, iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
 import Numeric.Natural (Natural)
 import Control.Monad.Identity
-import Language.Wasm (Module)
+import Language.Wasm.Structure (Module(..), Export(..), ExportDesc(..))
 import Data.Map (Map)
 import Data.Function ((&))
 import Analysis.Monad.Stack (MonadStack)
 import Analysis.Monad.ComponentTracking (ComponentTrackingM, runWithComponentTracking)
-import Analysis.Monad.Fix (MonadFixpoint, runFixT)
+import Analysis.Monad.Fix (runFixT)
 import Lattice (Meetable, BottomLattice, PartialOrder, Joinable)
-import Language.Wasm.Structure (StartFunction(..), start)
-import Data.Set (Set)
 
 type FunctionIndex = Natural -- as used in wasm package
 
@@ -49,14 +50,10 @@ intra fidx = runFixT @(IntraT (IntraAnalysisT (WasmCmp v) m) v) (evalFunction @_
 
 inter :: forall m a v . AnalysisM m a v => Module -> m ()
 -- TODO: monarch paper defines inter = lftp intra, but I guess this is missing the entry point, hence, we might prefer the following
-inter m = case start m of
-            Just (StartFunction fidx) ->
-              -- Start analyzing at the entry point
-              add (fidx, ()) >> iterateWL (intra @_ @a)
-            Nothing ->
-              -- No entry point, no analysis!
-              return ()
-
+-- Analyzes all exported function
+inter m = mapM_ (\x -> add (x, ())) exportedFuncs >> iterateWL (intra @_ @a)
+  where exportedFuncs :: [FunctionIndex]
+        exportedFuncs = [ fidx | ExportFunc fidx <- map desc (exports m) ]
 
 -- XXX: the problem with keeping the address polymorphic is that transformers
 -- such as `DependencyTrackingM` might overlap once it is instantiated since

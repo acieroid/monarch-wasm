@@ -21,6 +21,7 @@ main = do
   loaded <- loadFile fileName
   case loaded of
     Left err -> putStrLn err
-    Right m ->
-      let (returns, store) = run m in
-      putStrLn "done"
+    Right m -> do
+      let (returns, store) = run m
+      putStrLn "Return values:"
+      print returns
