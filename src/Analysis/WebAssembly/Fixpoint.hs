@@ -1,6 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 module Analysis.WebAssembly.Fixpoint where
-import Analysis.WebAssembly.Domain (WDomain, WAddress (..))
+import Analysis.WebAssembly.Domain (WDomain, WAddress (..), ConstPropValue, SingleAddress)
 import Analysis.WebAssembly.Semantics (evalFunction, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub)
 import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), StoreM, iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
 import Numeric.Natural (Natural)
@@ -57,22 +57,21 @@ inter m = case start m of
               -- No entry point, no analysis!
               return ()
 
--- XXX: the problem with keeping the address polymorphic is that transformers 
--- such as `DependencyTrackingM` might overlap once it is instantiated since 
--- it could equal `WasmCmp v` for which there already is a transformer on 
+
+-- XXX: the problem with keeping the address polymorphic is that transformers
+-- such as `DependencyTrackingM` might overlap once it is instantiated since
+-- it could equal `WasmCmp v` for which there already is a transformer on
 -- the stack, to solve this, I created a concrete address type.
--- Unfortunately, Haskell does not provide a way to proof type inequality, 
--- so this problem can only be solved by providing it with a concrete type 
+-- Unfortunately, Haskell does not provide a way to proof type inequality,
+-- so this problem can only be solved by providing it with a concrete type
 -- (or at least a type whose tag is already known)
-type Address = () -- TODO: change this to a suitable address representation
-instance WAddress Address where
-  anyAddr = ()
+-- For this reason, we have a ~ SingleAddress below
 
 -- Analyze a module, returning:
 -- - the resulting stack for each function
 -- - the linear memory
 -- - TODO: the globals
-analyze :: forall a v . (a ~ Address, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map (WasmCmp v) [v], Map a v)
+analyze :: forall a v . (a ~ SingleAddress, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map (WasmCmp v) [v], Map a v)
 analyze m = (returns, store)
   where (((), store), returns) = inter @_ @a m
           & runWithStore @(Map a v) @a @v
