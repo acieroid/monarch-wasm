@@ -4,9 +4,8 @@ module Analysis.WebAssembly.Fixpoint (
   WasmCmp
   ) where
 import Analysis.WebAssembly.Domain (WDomain, WAddress (..), SingleAddress)
-import Analysis.WebAssembly.Semantics (evalFunction, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub)
+import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub, WasmBody (..), FunctionIndex)
 import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), StoreM, iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
-import Numeric.Natural (Natural)
 import Control.Monad.Identity
 import Language.Wasm.Structure (Module(..), Export(..), ExportDesc(..))
 import Data.Map (Map)
@@ -15,8 +14,6 @@ import Analysis.Monad.Stack (MonadStack)
 import Analysis.Monad.ComponentTracking (ComponentTrackingM, runWithComponentTracking)
 import Analysis.Monad.Fix (runFixT)
 import Lattice (Meetable, BottomLattice, PartialOrder, Joinable)
-
-type FunctionIndex = Natural -- as used in wasm package
 
 type IntraT m v = MonadStack '[
     CtxT (),
@@ -33,7 +30,6 @@ type AnalysisM m a v = (
   WLocals m v,
   WGlobals m v,
   WasmModule m,
-  -- MonadFixpoint m Natural [v], -- We don't need this in the inter analysis as it is already satisfied by `runFixT`
   MapM (WasmCmp v) (WasmRes v) m, -- functions are mapped to their return stack
   -- XXX: do we need component tracking, if we already know all components statically? (assuming loops are fixed points)
   ComponentTrackingM m (WasmCmp v),
@@ -41,17 +37,17 @@ type AnalysisM m a v = (
   DependencyTrackingM m (WasmCmp v) (WasmCmp v), -- functions depend on called functions
   WorkListM m (WasmCmp v))
 
-type WasmCmp v = Key (IntraT Identity v) FunctionIndex
+type WasmCmp v = Key (IntraT Identity v) WasmBody
 type WasmRes v = Val (IntraT Identity v) [v]
 
 intra :: forall m a v . AnalysisM m a v => WasmCmp v -> m ()
-intra fidx = runFixT @(IntraT (IntraAnalysisT (WasmCmp v) m) v) (evalFunction @_ @a) fidx
-           & runIntraAnalysis fidx
+intra cmp = runFixT @(IntraT (IntraAnalysisT (WasmCmp v) m) v) (evalBody @_ @a) cmp
+           & runIntraAnalysis cmp
 
 inter :: forall m a v . AnalysisM m a v => Module -> m ()
 -- TODO: monarch paper defines inter = lftp intra, but I guess this is missing the entry point, hence, we might prefer the following
 -- Analyzes all exported function
-inter m = mapM_ (\x -> add (x, ())) exportedFuncs >> iterateWL (intra @_ @a)
+inter m = mapM_ (\x -> add (Function x, ())) exportedFuncs >> iterateWL (intra @_ @a)
   where exportedFuncs :: [FunctionIndex]
         exportedFuncs = [ fidx | ExportFunc fidx <- map desc (exports m) ]
 

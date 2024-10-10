@@ -3,13 +3,15 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE StandaloneDeriving #-}
 module Analysis.WebAssembly.Semantics (
-  evalFunction, WMonad, WStack, WLocals, WGlobals, WasmModule,
+  WasmBody(..), FunctionIndex,
+  evalBody, WMonad, WStack, WLocals, WGlobals, WasmModule,
   runWithWasmModule, runWithStub
 ) where
 
 import Control.Monad.Join (MonadJoin)
-import Language.Wasm.Structure (Module, Function(body), Expression, types, funcType, results, Instruction (..), ElemType (..), functions)
+import qualified Language.Wasm.Structure as Wasm
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..), WDomain, WAddress)
 import Prelude hiding (drop)
@@ -18,27 +20,50 @@ import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
 import Analysis.Monad (StoreM, MonadCache)
 import Control.Monad.Reader (ReaderT, runReaderT, ask, MonadReader)
 import Control.Monad.Identity (IdentityT (..))
+import Analysis.Monad.ComponentTracking (call)
+import Control.Monad (void)
+
+type FunctionIndex = Natural -- as used in wasm package
+
+-- We need a few Ord instances to get Ord on our WasmBody
+deriving instance Ord Wasm.ValueType
+deriving instance Ord Wasm.BlockType
+deriving instance Ord Wasm.ElemType
+deriving instance Ord Wasm.MemArg
+deriving instance Ord Wasm.IUnOp
+deriving instance Ord Wasm.IBinOp
+deriving instance Ord Wasm.IRelOp
+deriving instance Ord Wasm.FUnOp
+deriving instance Ord Wasm.FBinOp
+deriving instance Ord Wasm.FRelOp
+deriving instance Ord Wasm.BitSize
+deriving instance Ord (Wasm.Instruction Natural)
+
+data WasmBody =
+    Function !FunctionIndex
+  | BlockBody !Wasm.Expression
+  deriving (Show, Eq, Ord)
 
 -- A reader-like monad to get access to the entire program. Necessary to e.g., access types, jump targets, etc.
 class Monad m => WasmModule m where
-  getModule :: m Module
+  getModule :: m Wasm.Module
 
 instance {-# OVERLAPPABLE #-} (WasmModule m, MonadLayer t) => WasmModule (t m) where
   getModule = upperM getModule
 
-newtype WasmModuleT m a = WasmModuleT (ReaderT Module m a)
-                        deriving (Functor, Applicative, Monad, MonadTrans, MonadLayer, MonadReader Module)
-runWithWasmModule :: Module -> WasmModuleT m a -> m a
+newtype WasmModuleT m a = WasmModuleT (ReaderT Wasm.Module m a)
+                        deriving (Functor, Applicative, Monad, MonadTrans, MonadLayer, MonadReader Wasm.Module)
+runWithWasmModule :: Wasm.Module -> WasmModuleT m a -> m a
 runWithWasmModule r (WasmModuleT m) = runReaderT m r
 
 instance (Monad m) => WasmModule (WasmModuleT m) where
    getModule = ask
 
-numberOfReturnValues :: WasmModule m => Function -> m Int
+numberOfReturnValues :: WasmModule m => Wasm.Function -> m Int
 numberOfReturnValues f = do
   m <- getModule
-  let actualType = types m !! fromIntegral (funcType f)
-  return (length (results actualType))
+  let actualType = Wasm.types m !! fromIntegral (Wasm.funcType f)
+  return (length (Wasm.results actualType))
 
 -- We need to access the stack
 class (WValue v, Monad m) => WStack m v | m -> v where
@@ -95,48 +120,54 @@ type WMonad m a v = (
   WLocals m v, -- to manipulate locals
   WGlobals m v, -- to manipulate globals
   MonadJoin m, -- for non-determinism for branching (still TODO)
-  MonadFixpoint m Natural [v])
+  MonadFixpoint m WasmBody [v])
+
+evalBody :: forall m a v . WMonad m a v => WasmBody -> m [v]
+evalBody (Function fidx) = evalFunction @_ @a fidx
+evalBody (BlockBody expr) = evalExpr @_ @a expr >> return [] -- TODO: block arity
 
 -- Eval a function from its index
-evalFunction :: forall m a v . WMonad m a v => Natural -> m [v]
+evalFunction :: forall m a v . WMonad m a v => FunctionIndex -> m [v]
 evalFunction fidx = do
   m <- getModule
-  let f = functions m !! fromIntegral fidx
+  let f = Wasm.functions m !! fromIntegral fidx
   evalFun @m @a f
 
 -- Evaluates a wasm function, returns the return values of the functions, by truncating the stack
-evalFun :: forall m a v . WMonad m a v => Function -> m [v] -- TODO: wouldn't m () be enough here? Probably not because we want to cache return values
+evalFun :: forall m a v . WMonad m a v => Wasm.Function -> m [v]
 evalFun f = do
   _ <- evalExpr @m @a f.body
   nReturns <- numberOfReturnValues f
   mapM (const pop) [0..nReturns]
 
 -- An "expression" is just a sequence of instructions
-evalExpr :: forall m a v . WMonad m a v => Expression -> m ()
+evalExpr :: forall m a v . WMonad m a v => Wasm.Expression -> m ()
 evalExpr = mapM_ (evalInstr @m @a)
 
-todo :: Instruction Natural -> a
+todo :: Wasm.Instruction Natural -> a
 todo i = error ("Missing pattern for " ++ show i)
 
 -- This is where the basic semantics are all defined. An interesting aspect will be to handle the loops
-evalInstr :: WMonad m a v => Instruction Natural -> m ()
-evalInstr Unreachable = return ()
-evalInstr Nop = return ()
-evalInstr (RefNull FuncRef) = push (func Nothing)
-evalInstr (RefNull ExternRef) = push (extern Nothing)
-evalInstr Drop = drop
-evalInstr (GetLocal i) = getLocal i >>= push
-evalInstr (SetLocal i) = pop >>= setLocal i
-evalInstr (TeeLocal i) = do
+evalInstr :: forall m a v . WMonad m a v => Wasm.Instruction Natural -> m ()
+evalInstr Wasm.Unreachable = return ()
+evalInstr Wasm.Nop = return ()
+evalInstr (Wasm.RefNull Wasm.FuncRef) = push (func Nothing)
+evalInstr (Wasm.RefNull Wasm.ExternRef) = push (extern Nothing)
+evalInstr Wasm.Drop = drop
+evalInstr (Wasm.GetLocal i) = getLocal i >>= push
+evalInstr (Wasm.SetLocal i) = pop >>= setLocal i
+evalInstr (Wasm.TeeLocal i) = do
   v <- pop
   push v
   setLocal i v
-evalInstr (GetGlobal i) = getGlobal i >>= push
-evalInstr (SetGlobal i) = pop >>= setGlobal i
-evalInstr (I32Const n) = push (i32 n)
-evalInstr (IBinOp bitSize binOp) = do
+evalInstr (Wasm.GetGlobal i) = getGlobal i >>= push
+evalInstr (Wasm.SetGlobal i) = pop >>= setGlobal i
+evalInstr (Wasm.I32Const n) = push (i32 n)
+evalInstr (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
   push (iBinOp bitSize binOp v1 v2)
+-- evalInstr (Wasm.Loop bt loopBody) =
+--  void $ call (BlockBody loopBody)
 
 evalInstr i = todo i
