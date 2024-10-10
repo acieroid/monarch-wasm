@@ -17,7 +17,7 @@ import Analysis.Monad.Fix (MonadFixpoint)
 import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
 import Analysis.Monad (StoreM, MonadCache)
 import Control.Monad.Reader (ReaderT, runReaderT, ask, MonadReader)
-import Control.Monad.Identity (IdentityT (..), Identity (runIdentity))
+import Control.Monad.Identity (IdentityT (..))
 
 -- A reader-like monad to get access to the entire program. Necessary to e.g., access types, jump targets, etc.
 class Monad m => WasmModule m where
@@ -115,15 +115,15 @@ evalFun f = do
 evalExpr :: forall m a v . WMonad m a v => Expression -> m ()
 evalExpr = mapM_ (evalInstr @m @a)
 
+todo :: Instruction Natural -> a
+todo i = error ("Missing pattern for " ++ show i)
+
 -- This is where the basic semantics are all defined. An interesting aspect will be to handle the loops
 evalInstr :: WMonad m a v => Instruction Natural -> m ()
+evalInstr Unreachable = return ()
 evalInstr Nop = return ()
--- TODO: if, block, etc.
--- TODO: call
 evalInstr (RefNull FuncRef) = push (func Nothing)
 evalInstr (RefNull ExternRef) = push (extern Nothing)
--- TODO: RefIsNull
--- TODO: RefFunc index
 evalInstr Drop = drop
 evalInstr (GetLocal i) = getLocal i >>= push
 evalInstr (SetLocal i) = pop >>= setLocal i
@@ -133,9 +133,6 @@ evalInstr (TeeLocal i) = do
   setLocal i v
 evalInstr (GetGlobal i) = getGlobal i >>= push
 evalInstr (SetGlobal i) = pop >>= setGlobal i
--- TODO: load instructions
--- TODO: store instructions
--- TODO: MemorySize
--- TODO: MemoryGrow
--- TODO: MemoryFill
--- TODO: MemoryCopy
+evalInstr (I32Const n) = push (i32 n)
+
+evalInstr i = todo i
