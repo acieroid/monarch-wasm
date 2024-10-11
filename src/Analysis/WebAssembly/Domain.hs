@@ -13,8 +13,11 @@ import Numeric.Natural (Natural)
 import Lattice.Class (Meetable (..))
 import Language.Wasm.Structure (BitSize (..), IBinOp (..))
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
+import qualified Language.Wasm.Structure as Wasm
 
 class (Show v, Ord v) => WValue v where
+  top :: Wasm.ValueType -> v
+  zero :: Wasm.ValueType -> v
   i32 :: Word32 -> v
   i64 :: Word64 -> v
   f32 :: Word32 -> v
@@ -64,6 +67,18 @@ data ConstPropValue =
   deriving (Show, Ord, Eq)
 
 instance WValue ConstPropValue where
+  top Wasm.I32 = I32 Top
+  top Wasm.I64 = I64 Top
+  top Wasm.F32 = F32 Top
+  top Wasm.F64 = F64 Top
+  top Wasm.Func = Func Top
+  top Wasm.Extern = Extern Top
+  zero Wasm.I32 = I32 (Constant 0)
+  zero Wasm.I64 = I64 (Constant 0)
+  zero Wasm.F32 = F32 (Constant 0)
+  zero Wasm.F64 = F64 (Constant 0)
+  zero Wasm.Func = error "should not happen?"
+  zero Wasm.Extern = error "should not happen"
   i32 n = I32 (Constant n)
   i64 n = I64 (Constant n)
   f32 n = F32 (Constant n)

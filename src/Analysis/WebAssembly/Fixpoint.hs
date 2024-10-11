@@ -4,7 +4,7 @@ module Analysis.WebAssembly.Fixpoint (
   WasmCmp
   ) where
 import Analysis.WebAssembly.Domain (WDomain, WAddress (..), SingleAddress)
-import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub, WasmBody (..), FunctionIndex, runWithStack, WStackT)
+import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub, WasmBody (..), FunctionIndex, runWithStack, WStackT, runWithLocals)
 import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), StoreM, iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
 import Control.Monad.Identity
 import Language.Wasm.Structure (Module(..), Export(..), ExportDesc(..))
@@ -27,9 +27,9 @@ type AnalysisM m a v = (
   WAddress a,
   StoreM m a v,
   WasmModule m,
-  WStack m v, -- TODO: this is a local concern, but how to express it?
-  WLocals m v, -- TODO: this is a local concern, but how to express it?
-  WGlobals m v, -- TODO: this is a local concern, but how to express it?
+  WStack m v, -- We need the stack as a global concern, as loops may use the stack elements defined before
+  WLocals m v, -- We also need locals as a global concern, as locals are scoped to functions, which may include multiple blocks
+  WGlobals m v,
   MapM (WasmCmp v) (WasmRes v) m, -- bodies are mapped to their resulting stack
   -- TODO: dependencies with globals
   ComponentTrackingM m (WasmCmp v),
@@ -45,9 +45,9 @@ intra cmp = runFixT @(IntraT (IntraAnalysisT (WasmCmp v) m) v) (evalBody @_ @a) 
            & runIntraAnalysis cmp
 
 inter :: forall m a v . AnalysisM m a v => Module -> m ()
--- TODO: monarch paper defines inter = lftp intra, but I guess this is missing the entry point, hence, we might prefer the following
+-- XXX: monarch paper defines inter = lftp intra, but I guess this is missing the entry point, hence, we might prefer the following
 -- Analyzes all exported function
-inter m = mapM_ (\x -> add (Function x, ())) exportedFuncs >> iterateWL (intra @_ @a)
+inter m = mapM_ (\x -> add (EntryFunction x, ())) exportedFuncs >> iterateWL (intra @_ @a)
   where exportedFuncs :: [FunctionIndex]
         exportedFuncs = [ fidx | ExportFunc fidx <- map desc (exports m) ]
 
@@ -76,4 +76,5 @@ analyze m = (returns, store)
           & runWithWasmModule m
           & runWithStub
           & runWithStack
+          & runWithLocals
           & runIdentity
