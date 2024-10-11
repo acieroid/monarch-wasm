@@ -15,7 +15,7 @@ import qualified Language.Wasm.Structure as Wasm
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..), WDomain, WAddress)
 import Prelude hiding (drop)
-import Analysis.Monad.Fix (MonadFixpoint)
+import Analysis.Monad.Fix (MonadFixpoint (fix))
 import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
 import Analysis.Monad (StoreM, MonadCache)
 import Control.Monad.Reader (ReaderT, runReaderT, ask, MonadReader)
@@ -123,51 +123,54 @@ type WMonad m a v = (
   MonadFixpoint m WasmBody [v])
 
 evalBody :: forall m a v . WMonad m a v => WasmBody -> m [v]
-evalBody (Function fidx) = evalFunction @_ @a fidx
-evalBody (BlockBody expr) = evalExpr @_ @a expr >> return [] -- TODO: block arity
+evalBody = fix (evalBody' @_ @a)
+
+evalBody' :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> WasmBody -> m [v]
+evalBody' rec (Function fidx) = evalFunction @_ @a rec fidx
+evalBody' rec (BlockBody expr) = evalExpr @_ @a rec expr >> return [] -- TODO: block arity
 
 -- Eval a function from its index
-evalFunction :: forall m a v . WMonad m a v => FunctionIndex -> m [v]
-evalFunction fidx = do
+evalFunction :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> FunctionIndex -> m [v]
+evalFunction rec fidx = do
   m <- getModule
   let f = Wasm.functions m !! fromIntegral fidx
-  evalFun @m @a f
+  evalFun @m @a rec f
 
 -- Evaluates a wasm function, returns the return values of the functions, by truncating the stack
-evalFun :: forall m a v . WMonad m a v => Wasm.Function -> m [v]
-evalFun f = do
-  _ <- evalExpr @m @a f.body
+evalFun :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> Wasm.Function -> m [v]
+evalFun rec f = do
+  _ <- evalExpr @m @a rec f.body
   nReturns <- numberOfReturnValues f
   mapM (const pop) [0..nReturns]
 
 -- An "expression" is just a sequence of instructions
-evalExpr :: forall m a v . WMonad m a v => Wasm.Expression -> m ()
-evalExpr = mapM_ (evalInstr @m @a)
+evalExpr :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
+evalExpr rec = mapM_ (evalInstr @m @a rec)
 
 todo :: Wasm.Instruction Natural -> a
 todo i = error ("Missing pattern for " ++ show i)
 
 -- This is where the basic semantics are all defined. An interesting aspect will be to handle the loops
-evalInstr :: forall m a v . WMonad m a v => Wasm.Instruction Natural -> m ()
-evalInstr Wasm.Unreachable = return ()
-evalInstr Wasm.Nop = return ()
-evalInstr (Wasm.RefNull Wasm.FuncRef) = push (func Nothing)
-evalInstr (Wasm.RefNull Wasm.ExternRef) = push (extern Nothing)
-evalInstr Wasm.Drop = drop
-evalInstr (Wasm.GetLocal i) = getLocal i >>= push
-evalInstr (Wasm.SetLocal i) = pop >>= setLocal i
-evalInstr (Wasm.TeeLocal i) = do
+evalInstr :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> Wasm.Instruction Natural -> m ()
+evalInstr _ Wasm.Unreachable = return ()
+evalInstr _ Wasm.Nop = return ()
+evalInstr _ (Wasm.RefNull Wasm.FuncRef) = push (func Nothing)
+evalInstr _ (Wasm.RefNull Wasm.ExternRef) = push (extern Nothing)
+evalInstr _ Wasm.Drop = drop
+evalInstr _ (Wasm.GetLocal i) = getLocal i >>= push
+evalInstr _ (Wasm.SetLocal i) = pop >>= setLocal i
+evalInstr _ (Wasm.TeeLocal i) = do
   v <- pop
   push v
   setLocal i v
-evalInstr (Wasm.GetGlobal i) = getGlobal i >>= push
-evalInstr (Wasm.SetGlobal i) = pop >>= setGlobal i
-evalInstr (Wasm.I32Const n) = push (i32 n)
-evalInstr (Wasm.IBinOp bitSize binOp) = do
+evalInstr _ (Wasm.GetGlobal i) = getGlobal i >>= push
+evalInstr _ (Wasm.SetGlobal i) = pop >>= setGlobal i
+evalInstr _ (Wasm.I32Const n) = push (i32 n)
+evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
   push (iBinOp bitSize binOp v1 v2)
--- evalInstr (Wasm.Loop bt loopBody) =
---  void $ call (BlockBody loopBody)
+evalInstr rec (Wasm.Loop bt loopBody) =
+ void $ rec (BlockBody loopBody)
 
-evalInstr i = todo i
+evalInstr _ i = todo i
