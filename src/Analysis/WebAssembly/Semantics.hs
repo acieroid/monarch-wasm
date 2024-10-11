@@ -6,8 +6,8 @@
 {-# LANGUAGE StandaloneDeriving #-}
 module Analysis.WebAssembly.Semantics (
   WasmBody(..), FunctionIndex,
-  evalBody, WMonad, WStack, WLocals, WGlobals, WasmModule,
-  runWithWasmModule, runWithStub
+  evalBody, WMonad, WStack, WStackT, WLocals, WGlobals, WasmModule,
+  runWithWasmModule, runWithStack, runWithStub
 ) where
 
 import Control.Monad.Join (MonadJoin)
@@ -20,8 +20,8 @@ import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
 import Analysis.Monad (StoreM, MonadCache)
 import Control.Monad.Reader (ReaderT, runReaderT, ask, MonadReader)
 import Control.Monad.Identity (IdentityT (..))
-import Analysis.Monad.ComponentTracking (call)
 import Control.Monad (void)
+import Control.Monad.State (State, MonadState (..), StateT (..))
 
 type FunctionIndex = Natural -- as used in wasm package
 
@@ -74,6 +74,21 @@ class (WValue v, Monad m) => WStack m v | m -> v where
     _ <- pop
     return ()
 
+newtype WStackT v m a = WStackT { getStackT :: StateT [v] m a }
+             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoin, MonadState [v])
+instance (WValue v, Monad m) => WStack (WStackT v m) v where
+  push v = do
+    stack <- get
+    put (v : stack)
+  pop = do
+    stack <- get
+    case stack of
+      first : rest -> put stack >> return first
+      [] -> error "invalid program does not properly manage its stack"
+
+runWithStack :: forall v m a . WStackT v m a -> m (a, [v])
+runWithStack = flip runStateT [] . getStackT
+
 instance {-# OVERLAPPABLE #-} (WStack m v, MonadLayer t) => WStack (t m) v where
   push = upperM . push
   pop = upperM pop
@@ -102,9 +117,8 @@ instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t) => WGlobals (t m) v w
 -- as they might need to be at different locations in the monad stack.
 newtype StubT v m a = StubT { getStubT :: IdentityT m a }
              deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoin)
-instance (WValue v, Monad m) => WStack (StubT v m) v
-instance (WValue v, Monad m) => WLocals (StubT v m) v
-instance (WValue v, Monad m) => WGlobals (StubT v m) v
+instance (WValue v, Monad m) => WLocals (StubT v m) v -- TODO: implement as Map
+instance (WValue v, Monad m) => WGlobals (StubT v m) v -- TODO: implement as Map
 runWithStub :: forall v m a . StubT v m a -> m a
 runWithStub = runIdentityT . getStubT
 
