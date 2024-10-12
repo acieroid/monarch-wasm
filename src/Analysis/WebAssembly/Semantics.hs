@@ -1,10 +1,7 @@
-{-# OPTIONS_GHC -Wno-unused-matches #-}
-{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE LambdaCase #-}
 module Analysis.WebAssembly.Semantics (
   WasmBody(..), FunctionIndex,
   evalBody, WMonad, WStack, WStackT, WLocals, WGlobals, WasmModule,
@@ -97,7 +94,7 @@ instance (WValue v, Monad m) => WStack (WStackT v m) v where
   pop = do
     stack <- S.get
     case stack of
-      first : rest -> S.put stack >> return first
+      first : rest -> S.put rest >> return first
       [] -> error "invalid program does not properly manage its stack"
 
 runWithStack :: forall v m a . WStackT v m a -> m (a, [v])
@@ -164,19 +161,8 @@ evalBody :: forall m a v . WMonad m a v => WasmBody -> m [v]
 evalBody = fix (evalBody' @_ @a)
 
 -- TODO: bug: there's one value too much on the return
-evalBody' :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> WasmBody -> m [v]
-evalBody' rec (Function fidx) = do
-  m <- getModule
-  let f = Wasm.functions m !! fromIntegral fidx
-  let t = Wasm.types m !! fromIntegral (Wasm.funcType f)
-  let nParams = length (Wasm.params t)
-  let nReturns = length (Wasm.results t)
-  args <- mapM (const pop) [0..nParams] -- pop arguments from the stack
-  mapM_ (\(i, v) -> setLocal (fromIntegral i) v) (zip [0..nParams] (reverse args)) -- store arguments in locals
-  -- TODO: store 0 for other locals, see below (and put most code in common)
-  evalFun @m @a rec f -- run the function
-  mapM (const pop) [0..nReturns] -- pop the results
-evalBody' rec (EntryFunction fidx) = do
+applyFun :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> FunctionIndex -> (Wasm.FuncType -> m [v]) -> m [v]
+applyFun rec fidx getArgs = do
   m <- getModule
   let f = Wasm.functions m !! fromIntegral fidx
   let t = Wasm.types m !! fromIntegral (Wasm.funcType f)
@@ -184,11 +170,15 @@ evalBody' rec (EntryFunction fidx) = do
   let nReturns = length (Wasm.results t)
   let localTypes = Wasm.localTypes f
   let nLocals = length localTypes
-  let args = map top (Wasm.params t)
+  argsv <- getArgs t
   let locals = map zero localTypes
-  mapM_ (\(i, v) -> setLocal (fromIntegral i) v) (zip [0..(nParams+nLocals)] (args++locals))
+  mapM_ (\(i, v) -> setLocal (fromIntegral i) v) (zip [0..(nParams+nLocals)-1] (argsv++locals)) -- store arguments in locals
   evalFun @m @a rec f -- run the function
-  mapM (const pop) [0..nReturns] -- pop the results
+  reverse <$> mapM (const pop) [0..(nReturns-1)] -- pop the results
+
+evalBody' :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> WasmBody -> m [v]
+evalBody' rec (Function fidx) = applyFun @_ @a rec fidx (\t -> reverse <$> mapM (const pop) [0..((length (Wasm.params t))-1)])
+evalBody' rec (EntryFunction fidx) = applyFun @_ @a rec fidx (\t -> return $ map top (Wasm.params t))
 evalBody' rec (BlockBody expr) = evalExpr @_ @a rec expr >> return [] -- TODO: block arity
 
 -- Evaluates a wasm function, leaving its results on the stack
