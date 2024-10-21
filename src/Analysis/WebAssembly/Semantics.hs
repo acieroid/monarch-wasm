@@ -4,7 +4,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 module Analysis.WebAssembly.Semantics (
   WasmBody(..), FunctionIndex,
-  evalBody, WMonad, WStack, WStackT, WLocals, WGlobals, WasmModule,
+  evalBody, WMonad, WStack, WStackT, WLocals, WGlobals, WasmModule, WEsc,
   runWithWasmModule, runWithStack, runWithLocals, runWithStub
 ) where
 
@@ -26,6 +26,8 @@ import Analysis.Monad.ComponentTracking (spawn, ComponentTrackingM)
 import Analysis.Monad.Cache (cached)
 import Lattice (BottomLattice(bottom))
 import Lattice.Class (Lattice)
+import Control.Monad.Escape (MonadEscape(..), escape)
+import Domain (Domain)
 
 type FunctionIndex = Natural -- as used in wasm package
 
@@ -174,6 +176,10 @@ runWithStub = runIdentityT . getStubT
 -- We need to access the linear memory (the heap)
 type WLinearMemory m a v = StoreM m a v
 
+data WEsc v = Return ![v]
+            | Break !Natural -- TODO: need to include stack as well?
+  deriving (Eq, Ord, Show)
+
 type WMonad m a v = (
   WAddress a,
   WasmModule m, -- to access the entire module for type information
@@ -184,6 +190,8 @@ type WMonad m a v = (
   WGlobals m v, -- to manipulate globals
   MonadJoin m, -- for non-determinism for branching (still TODO)
   MonadCache m,
+  MonadEscape m,
+  Domain (Esc m) (WEsc v),
   MapM (Key m WasmBody) (Val m [v]) m,
   ComponentTrackingM m (Key m WasmBody)
   -- MonadFixpoint m WasmBody [v]
@@ -256,6 +264,8 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
 evalInstr rec (Wasm.Loop bt loopBody) =
   rec (LoopBody bt loopBody) >>= mapM_ push
 evalInstr rec (Wasm.Block bt blockBody) =
-  traceStack "before block:" >> rec (BlockBody bt blockBody) >>= mapM_ push >> traceStack "after block:"
+  rec (BlockBody bt blockBody) >>= mapM_ push
+evalInstr _ (Wasm.Br n) =
+   escape @m @(WEsc v) @() (Break n) -- TODO: catch in Block/Loop, rethrow with -1
 
 evalInstr _ i = todo i
