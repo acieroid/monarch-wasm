@@ -1,7 +1,8 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 module Analysis.WebAssembly.Fixpoint (
   analyze,
-  WasmCmp
+  WasmCmp,
+  WasmRes
   ) where
 import Analysis.WebAssembly.Domain (WDomain, WAddress (..), SingleAddress)
 import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub, WasmBody (..), FunctionIndex, runWithStack, WStackT, runWithLocals, WEsc)
@@ -29,8 +30,6 @@ type IntraT m v = MonadStack '[
 type InterM m a v = (
   Meetable v,
   WAddress a,
-  MonadEscape m,
-  Domain (Esc m) (WEsc v),
   StoreM m a v,
   WasmModule m,
   WStack m v, -- TODO: no need for the stack in the global concerns, can be moved to local only
@@ -70,7 +69,7 @@ inter m = mapM_ (\x -> add (EntryFunction x, ())) exportedFuncs >> iterateWL (in
 -- - the resulting stack for each function
 -- - the linear memory
 -- - TODO: the globals
-analyze :: forall a v . (a ~ SingleAddress, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map (WasmCmp v) (MayEscape (Set (WEsc v)) [v]), Map a v)
+analyze :: forall a v . (a ~ SingleAddress, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map (WasmCmp v) (WasmRes v), Map a v)
 analyze m = (returns, store)
   where ((((), store), returns), _) = inter @_ @a m
           & runWithStore @(Map a v) @a @v
