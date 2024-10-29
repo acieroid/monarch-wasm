@@ -16,6 +16,7 @@ import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
 import qualified Language.Wasm.Structure as Wasm
 import qualified Data.Set as S
 import Domain.Core (BoolDomain(..))
+import Lattice.ConstantPropagationLattice (CP(..))
 
 class (Show v, Ord v) => WValue v where
   top :: Wasm.ValueType -> v
@@ -50,26 +51,14 @@ concreteiBinOp IShrS = \x y -> shiftR x (fromIntegral y)
 concreteiBinOp IRotl = \x y -> rotateL x (fromIntegral y)
 concreteiBinOp IRotr = \x y -> rotateR x (fromIntegral y)
 
--- Similar to a CP lattice, but without bottom. Isomorphic to Maybe, but we prefer explicit names
--- TODO: CP lattice doesn't have bottom anymore
-data ConstOrTop a =
-    Constant !a
-  | Top
-  deriving (Show, Ord, Eq)
-
-instance Ord a => Joinable (ConstOrTop a) where
-  join :: ConstOrTop a -> ConstOrTop a -> ConstOrTop a
-  join v@(Constant x) (Constant y) | x == y = v
-  join _ _ = Top
-
 data ConstPropValue =
     Bottom
-  | I32 !(ConstOrTop Word32)
-  | I64 !(ConstOrTop Word64)
-  | F32 !(ConstOrTop Word32)
-  | F64 !(ConstOrTop Word64)
-  | Func !(ConstOrTop (Maybe Natural))
-  | Extern !(ConstOrTop (Maybe Natural))
+  | I32 !(CP Word32)
+  | I64 !(CP Word64)
+  | F32 !(CP Word32)
+  | F64 !(CP Word64)
+  | Func !(CP (Maybe Natural))
+  | Extern !(CP (Maybe Natural))
   | Break !(S.Set Natural)
   deriving (Show, Ord, Eq)
 

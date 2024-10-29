@@ -26,7 +26,7 @@
 
   (export "br-with-stack" (func 3))
   (func (;2;) (type 2) (param) (result i32)
-    block
+    block (result i32)
       i32.const 0
       br 0
     end)
