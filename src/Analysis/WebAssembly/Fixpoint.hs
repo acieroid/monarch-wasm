@@ -32,7 +32,7 @@ type IntraT m v = MonadStack '[
 type InterM m a v = (
   Meetable v,
   WAddress a,
-  StoreM m a v,
+  StoreM a v m,
   WasmModule m,
   WStack m v, -- TODO: no need for the stack in the global concerns, can be moved to local only
   WLocals m v, -- We need locals as a global concern, as locals are scoped to functions, which may include multiple blocks
@@ -42,7 +42,9 @@ type InterM m a v = (
   ComponentTrackingM m (WasmCmp v),
   DependencyTrackingM m (WasmCmp v) a, -- functions depend on read addresses (TODO: and globals)
   DependencyTrackingM m (WasmCmp v) (WasmCmp v), -- functions depend on called functions
-  WorkListM m (WasmCmp v))
+  WorkListM m (WasmCmp v),
+  BottomLattice v
+  )
 
 type WasmCmp v = Key (IntraT Identity v) WasmBody
 type WasmRes v = Val (IntraT Identity v) [v]

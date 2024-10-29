@@ -17,12 +17,19 @@
       i32.const 1
     end)
 
-  (export "br" (func 2))
+  ;; (export "br" (func 2))
   (func (;2;) (type 2) (param) (result i32)
     block
       br 0
     end
     i32.const 0)
+
+  (export "br-with-stack" (func 3))
+  (func (;2;) (type 2) (param) (result i32)
+    block
+      i32.const 0
+      br 0
+    end)
 
   (table (;0;) 1 1 funcref)
   (memory (;0;) 2)

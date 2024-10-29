@@ -9,7 +9,7 @@ module Analysis.WebAssembly.Semantics (
   runWithWasmModule, runWithStack, runWithLocals, runWithStub
 ) where
 
-import Control.Monad.Join (MonadJoin (..), msplitOn, condCP)
+import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL)
 import qualified Language.Wasm.Structure as Wasm
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..), WDomain, WAddress)
@@ -25,7 +25,7 @@ import Analysis.Monad.ComponentTracking (spawn, ComponentTrackingM)
 import Analysis.Monad.Cache (cached)
 import Lattice (BottomLattice(bottom), Joinable, joinMap, joins)
 import Lattice.Class (Lattice)
-import Control.Monad.Escape (MonadEscape(..), escape)
+import Control.Monad.Escape (MonadEscape(..), escape, catchOn)
 import Domain (Domain, BoolDomain (..))
 import qualified Data.Set as S
 import Lattice.Split (SplitLattice)
@@ -60,7 +60,7 @@ data WasmBody =
 class Monad m => WasmModule m where
   getModule :: m Wasm.Module
 
-instance {-# OVERLAPPABLE #-} (WasmModule m, MonadLayer t) => WasmModule (t m) where
+instance {-# OVERLAPPABLE #-} (WasmModule m, MonadLayer t, Monad (t m)) => WasmModule (t m) where
   getModule = upperM getModule
 
 newtype WasmModuleT m a = WasmModuleT (ReaderT Wasm.Module m a)
@@ -111,9 +111,9 @@ class (WValue v, Monad m) => WStack m v | m -> v where
   traceStack :: String -> m ()
 
 newtype WStackT v m a = WStackT { getStackT :: S.StateT [v] m a }
-             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoin, S.MonadState [v])
+             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoinable, S.MonadState [v])
 
-instance {-# OVERLAPPABLE #-} (WStack m v, MonadLayer t) => WStack (t m) v where
+instance {-# OVERLAPPABLE #-} (WStack m v, MonadLayer t, Monad (t m)) => WStack (t m) v where
   push = upperM . push
   pop = upperM pop
   traceStack m = upperM (traceStack m)
@@ -142,7 +142,7 @@ class (WValue v, Monad m) => WLocals m v | m -> v where
 newtype WLocalsT v m a = WLocalsT { getLocalsT :: S.StateT (M.Map Natural v) m a }
              deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (M.Map Natural v))
 
-instance {-# OVERLAPPABLE #-} (WLocals m v, MonadLayer t) => WLocals (t m) v where
+instance {-# OVERLAPPABLE #-} (WLocals m v, MonadLayer t, Monad (t m)) => WLocals (t m) v where
   setLocal i = upperM . setLocal i
   getLocal = upperM . getLocal
 
@@ -164,7 +164,7 @@ class (WValue v, Monad m) => WGlobals m v | m -> v where
   setGlobal :: Natural -> v -> m ()
   getGlobal :: Natural -> m v
 
-instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t) => WGlobals (t m) v where
+instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t, Monad (t m)) => WGlobals (t m) v where
   setGlobal i = upperM . setGlobal i
   getGlobal = upperM . getGlobal
 
@@ -172,13 +172,13 @@ instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t) => WGlobals (t m) v w
 -- implement these with a suitable instance, perhaps split them up too,
 -- as they might need to be at different locations in the monad stack.
 newtype StubT v m a = StubT { getStubT :: IdentityT m a }
-             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoin)
+             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoinable)
 instance (WValue v, Monad m) => WGlobals (StubT v m) v -- TODO: implement as Map
 runWithStub :: forall v m a . StubT v m a -> m a
 runWithStub = runIdentityT . getStubT
 
 -- We need to access the linear memory (the heap)
-type WLinearMemory m a v = StoreM m a v
+type WLinearMemory m a v = StoreM a v m
 
 data WEsc v = Return ![v]
             | Break !v -- TODO: need to include stack as well?
@@ -186,8 +186,8 @@ data WEsc v = Return ![v]
   deriving (Eq, Ord, Show)
 
 class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
-  isReturn :: BoolDomain b => esc -> b
-  isBreak :: BoolDomain b => esc -> b
+  isReturn :: (BoolDomain b, BottomLattice b) => esc -> b
+  isBreak :: (BoolDomain b, BottomLattice b) => esc -> b
   getBreakLevel :: esc -> v
 
 instance (Ord v, Show v, Joinable v, BottomLattice v) => WEscape (S.Set (WEsc v)) v where
@@ -200,8 +200,8 @@ instance (Ord v, Show v, Joinable v, BottomLattice v) => WEscape (S.Set (WEsc v)
   getBreakLevel s = joins (mapMaybe (\case Break n -> Just n
                                            _ -> Nothing) (S.elems s))
 
-catchOn :: (MonadEscape m, MonadJoin m, SplitLattice (Esc m), Lattice (Esc m), Lattice a) => m a -> (Esc m -> CP Bool, Esc m -> m a) -> m a
-catchOn bdy (prd, hdl) = bdy `catch` msplitOn (return . prd) hdl throw
+-- catchOn :: (MonadEscape m, MonadJoin m, SplitLattice (Esc m), Lattice (Esc m), Lattice a) => m a -> (Esc m -> CP Bool, Esc m -> m a) -> m a
+-- catchOn bdy (prd, hdl) = bdy `catch` msplitOn (return . prd) hdl throw
 
 type WMonad m a v = (
   WAddress a,
@@ -218,7 +218,9 @@ type WMonad m a v = (
   SplitLattice (Esc m),
   Domain (Esc m) (WEsc v),
   MapM (Key m WasmBody) (Val m [v]) m,
-  ComponentTrackingM m (Key m WasmBody)
+  ComponentTrackingM m (Key m WasmBody),
+  BottomLattice v,
+  BottomLattice (Esc m)
   -- MonadFixpoint m WasmBody [v]
   )
 
@@ -289,7 +291,7 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
 evalInstr rec (Wasm.Loop bt loopBody) =
   rec (LoopBody bt loopBody) >>= mapM_ push
 evalInstr rec (Wasm.Block bt blockBody) =
-  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (isBreak, handleBreak)
+  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak)
   where handleBreak :: Esc m -> m ()
         handleBreak b = condCP (return $ doesBreakCurrentBlock level)
                                (return ()) -- TODO: stack
