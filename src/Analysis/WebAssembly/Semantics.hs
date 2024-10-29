@@ -2,32 +2,36 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE LambdaCase #-}
 module Analysis.WebAssembly.Semantics (
   WasmBody(..), FunctionIndex,
   evalBody, WMonad, WStack, WStackT, WLocals, WGlobals, WasmModule, WEsc,
   runWithWasmModule, runWithStack, runWithLocals, runWithStub
 ) where
 
-import Control.Monad.Join (MonadJoin)
+import Control.Monad.Join (MonadJoin (..), msplitOn, condCP)
 import qualified Language.Wasm.Structure as Wasm
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..), WDomain, WAddress)
-import Prelude hiding (drop)
-import Analysis.Monad.Fix (MonadFixpoint (fix))
+import Prelude hiding (break, drop)
 import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
-import Analysis.Monad (StoreM, MonadCache (..), MapM (..), MapT, runWithMapping)
+import Analysis.Monad (StoreM, MonadCache (..), MapM (..))
 import Control.Monad.Reader (ReaderT, runReaderT, ask, MonadReader)
 import Control.Monad.Identity (IdentityT (..))
-import Control.Monad (void)
 import qualified Control.Monad.State as S
 import qualified Data.Map as M
 import Debug.Trace (trace)
 import Analysis.Monad.ComponentTracking (spawn, ComponentTrackingM)
 import Analysis.Monad.Cache (cached)
-import Lattice (BottomLattice(bottom))
+import Lattice (BottomLattice(bottom), Joinable, joinMap, joins)
 import Lattice.Class (Lattice)
 import Control.Monad.Escape (MonadEscape(..), escape)
-import Domain (Domain)
+import Domain (Domain, BoolDomain (..))
+import qualified Data.Set as S
+import Lattice.Split (SplitLattice)
+import Lattice.ConstantPropagationLattice (CP)
+import Data.Maybe (mapMaybe)
+import Control.Monad.DomainError (DomainError)
 
 type FunctionIndex = Natural -- as used in wasm package
 
@@ -177,8 +181,27 @@ runWithStub = runIdentityT . getStubT
 type WLinearMemory m a v = StoreM m a v
 
 data WEsc v = Return ![v]
-            | Break !Natural -- TODO: need to include stack as well?
+            | Break !v -- TODO: need to include stack as well?
+            | Error !DomainError
   deriving (Eq, Ord, Show)
+
+class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
+  isReturn :: BoolDomain b => esc -> b
+  isBreak :: BoolDomain b => esc -> b
+  getBreakLevel :: esc -> v
+
+instance (Ord v, Show v, Joinable v, BottomLattice v) => WEscape (S.Set (WEsc v)) v where
+  isReturn = joinMap $ \case Return _ -> true
+                             _ -> false
+  isBreak = joinMap $ \case Break _ -> true
+                            _ -> false
+  -- getBreakLevel' n = mjoinMap $ \case Break n -> (S.singleton n)
+  --                                     _ -> S.empty -- XXX: what to do here?
+  getBreakLevel s = joins (mapMaybe (\case Break n -> Just n
+                                           _ -> Nothing) (S.elems s))
+
+catchOn :: (MonadEscape m, MonadJoin m, SplitLattice (Esc m), Lattice (Esc m), Lattice a) => m a -> (Esc m -> CP Bool, Esc m -> m a) -> m a
+catchOn bdy (prd, hdl) = bdy `catch` msplitOn (return . prd) hdl throw
 
 type WMonad m a v = (
   WAddress a,
@@ -191,6 +214,8 @@ type WMonad m a v = (
   MonadJoin m, -- for non-determinism for branching (still TODO)
   MonadCache m,
   MonadEscape m,
+  WEscape (Esc m) v,
+  SplitLattice (Esc m),
   Domain (Esc m) (WEsc v),
   MapM (Key m WasmBody) (Val m [v]) m,
   ComponentTrackingM m (Key m WasmBody)
@@ -218,7 +243,7 @@ applyFun rec fidx getArgs = do
 
 evalBody' :: forall m a v . WMonad m a v => (WasmBody -> m [v]) -> WasmBody -> m [v]
 evalBody' rec (Function fidx) = applyFun @_ @a rec fidx (\t -> reverse <$> mapM (const pop) [0..((length (Wasm.params t))-1)])
-evalBody' rec (EntryFunction fidx) = applyFun @_ @a rec fidx (\t -> return $ map top (Wasm.params t))
+evalBody' rec (EntryFunction fidx) = applyFun @_ @a rec fidx (return . map top . Wasm.params)
 evalBody' rec (BlockBody bt expr) = do
   nReturns <- blockReturnArity bt
   traceStack "before block body"
@@ -264,8 +289,16 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
 evalInstr rec (Wasm.Loop bt loopBody) =
   rec (LoopBody bt loopBody) >>= mapM_ push
 evalInstr rec (Wasm.Block bt blockBody) =
-  rec (BlockBody bt blockBody) >>= mapM_ push
+  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (isBreak, handleBreak)
+  where handleBreak :: Esc m -> m ()
+        handleBreak b = condCP (return $ doesBreakCurrentBlock level)
+                               (return ()) -- TODO: stack
+                               (escape (Break (decreaseBreakLevel level)))
+          where level = getBreakLevel b
+
+-- escape (Break ((getBreakLevel b) `minus` (break 1)))
+
 evalInstr _ (Wasm.Br n) =
-   escape @m @(WEsc v) @() (Break n) -- TODO: catch in Block/Loop, rethrow with -1
+   escape @m @(WEsc v) @() (Break (break n))
 
 evalInstr _ i = todo i

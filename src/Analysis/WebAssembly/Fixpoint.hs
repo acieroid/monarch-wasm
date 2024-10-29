@@ -18,6 +18,8 @@ import Lattice (Meetable, BottomLattice, PartialOrder, Joinable)
 import Control.Monad.Escape (MonadEscape (..), MayEscapeT, MayEscape)
 import Domain (Domain)
 import Data.Set (Set)
+import Domain.Core (NumberDomain)
+import Control.Monad.DomainError (DomainError)
 
 type IntraT m v = MonadStack '[
     MayEscapeT (Set (WEsc v)),
@@ -69,7 +71,7 @@ inter m = mapM_ (\x -> add (EntryFunction x, ())) exportedFuncs >> iterateWL (in
 -- - the resulting stack for each function
 -- - the linear memory
 -- - TODO: the globals
-analyze :: forall a v . (a ~ SingleAddress, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v) => Module -> (Map (WasmCmp v) (WasmRes v), Map a v)
+analyze :: forall a v . (a ~ SingleAddress, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v, Joinable v) => Module -> (Map (WasmCmp v) (WasmRes v), Map a v)
 analyze m = (returns, store)
   where ((((), store), returns), _) = inter @_ @a m
           & runWithStore @(Map a v) @a @v

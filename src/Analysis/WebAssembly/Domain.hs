@@ -14,6 +14,8 @@ import Lattice.Class (Meetable (..))
 import Language.Wasm.Structure (BitSize (..), IBinOp (..))
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
 import qualified Language.Wasm.Structure as Wasm
+import qualified Data.Set as S
+import Domain.Core (BoolDomain(..))
 
 class (Show v, Ord v) => WValue v where
   top :: Wasm.ValueType -> v
@@ -25,6 +27,9 @@ class (Show v, Ord v) => WValue v where
   func :: Maybe Natural -> v
   extern :: Maybe Natural -> v
   iBinOp :: BitSize -> IBinOp -> v -> v -> v
+  break :: Natural -> v
+  decreaseBreakLevel :: v -> v
+  doesBreakCurrentBlock :: BoolDomain b => v -> b
 
 -- Implements binary operations on i32/i64
 -- XXX: This does not perfectly follow the WebAssembly semantics, for simplicity.
@@ -46,6 +51,7 @@ concreteiBinOp IRotl = \x y -> rotateL x (fromIntegral y)
 concreteiBinOp IRotr = \x y -> rotateR x (fromIntegral y)
 
 -- Similar to a CP lattice, but without bottom. Isomorphic to Maybe, but we prefer explicit names
+-- TODO: CP lattice doesn't have bottom anymore
 data ConstOrTop a =
     Constant !a
   | Top
@@ -64,6 +70,7 @@ data ConstPropValue =
   | F64 !(ConstOrTop Word64)
   | Func !(ConstOrTop (Maybe Natural))
   | Extern !(ConstOrTop (Maybe Natural))
+  | Break !(S.Set Natural)
   deriving (Show, Ord, Eq)
 
 instance WValue ConstPropValue where
@@ -90,15 +97,24 @@ instance WValue ConstPropValue where
   iBinOp BS64 binOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiBinOp binOp x y))
   iBinOp BS32 _ (I64 _) (I64 _) = I64 Top
   iBinOp _ _ _ _ = error "should never mistype binary operation"
+  break = Break . S.singleton
+  decreaseBreakLevel (Break n) = Break (S.map (\x -> x - 1) n)
+  decreaseBreakLevel _ = Bottom
+  doesBreakCurrentBlock (Break n) | n == S.singleton 0 = true
+                                  | S.member 0 n = boolTop
+  doesBreakCurrentBlock _ = false
 
 instance Joinable ConstPropValue where
+  join Bottom x = x
+  join x Bottom = x
   join (I32 x) (I32 y) = I32 (join x y)
   join (I64 x) (I64 y) = I64 (join x y)
   join (F32 x) (F32 y) = F32 (join x y)
   join (F64 x) (F64 y) = F64 (join x y)
   join (Func x) (Func y) = Func (join x y)
   join (Extern x) (Extern y) = Extern (join x y)
-  join _ _= error "should never join elements of different types"
+  join (Break x) (Break y) = Break (S.union x y)
+  join x y = error $ "should never join elements of different types" ++ (show x) ++ ", " ++ (show y)
 
 instance Meetable ConstPropValue where
   meet v@(I32 x) (I32 y) | x == y = v
@@ -107,6 +123,8 @@ instance Meetable ConstPropValue where
   meet v@(F64 x) (F64 y) | x == y = v
   meet v@(Func x) (Func y) | x == y = v
   meet v@(Extern x) (Extern y) | x == y = v
+  meet (Break x) (Break y) | S.null (S.intersection x y) = Bottom
+  meet (Break x) (Break y) = Break (S.intersection x y)
   meet _ _ = Bottom
 
 instance PartialOrder ConstPropValue where
