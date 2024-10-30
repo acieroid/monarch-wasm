@@ -9,7 +9,7 @@ module Analysis.WebAssembly.Semantics (
   runWithWasmModule, runWithStack, runWithLocals, runWithStub
 ) where
 
-import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL)
+import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins)
 import qualified Language.Wasm.Structure as Wasm
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..), WDomain, WAddress)
@@ -186,22 +186,22 @@ runWithStub = runIdentityT . getStubT
 type WLinearMemory m a v = StoreM a v m
 
 data WEsc v = Return ![v]
-            | Break !v -- TODO: need to include stack as well?
+            | Break !Natural
             | Error !DomainError
   deriving (Eq, Ord, Show)
 
 class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
   isReturn :: (BoolDomain b, BottomLattice b) => esc -> b
   isBreak :: (BoolDomain b, BottomLattice b, Show b) => esc -> b
-  getBreakLevel :: esc -> v
+  getBreakLevel :: esc -> S.Set Natural
 
 instance (Ord v, Show v, Joinable v, BottomLattice v) => WEscape (S.Set (WEsc v)) v where
   isReturn = joinMap $ \case Return _ -> true
                              _ -> false
   isBreak b = traceShowId ((joinMap $ \case Break _ -> true
                                             _ -> false) b)
-  getBreakLevel s = joins (mapMaybe (\case Break n -> Just n
-                                           _ -> Nothing) (S.elems s))
+  getBreakLevel s = S.fromList (mapMaybe (\case Break n -> Just n
+                                                _ -> Nothing) (S.elems s))
 
 type WMonad m a v = (
   WAddress a,
@@ -289,13 +289,15 @@ evalInstr rec (Wasm.Loop bt loopBody) =
 evalInstr rec (Wasm.Block bt blockBody) =
   (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak)
   where handleBreak :: Esc m -> m ()
-        handleBreak b = condCP (return (doesBreakCurrentBlock level))
-                               (push (i32 0)) -- TODO: stack
-                               (escape (Break (decreaseBreakLevel level)))
-          where level = getBreakLevel b
+        handleBreak b = mjoins (map (\l ->
+                                  if l == 0 then
+                                    push (i32 0) -- TODO: stack
+                                  else
+                                    escape (Break (l - 1) :: WEsc v)) (S.elems levels))
+          where levels = getBreakLevel b
 
 
 evalInstr _ (Wasm.Br n) =
-   escape @m @(WEsc v) @() (Break (break n))
+   escape @m @(WEsc v) @() (Break n)
 
 evalInstr _ i = todo i
