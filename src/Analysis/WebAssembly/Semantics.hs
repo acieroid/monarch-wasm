@@ -97,8 +97,7 @@ call' body = do
   k <- key body
   spawn k
   m <- cached @m @WasmBody @[v] k
-  maybe (return $ map (const bottom) [0..(arity-1)]) return m -- (map (const bottom) [0..(arity-1)]) return m
-
+  maybe (return $ map (const bottom) [0..(arity-1)]) return m
 
 -- We need to access the stack
 class (WValue v, Monad m) => WStack m v | m -> v where
@@ -108,7 +107,7 @@ class (WValue v, Monad m) => WStack m v | m -> v where
   drop = do
     _ <- pop
     return ()
-  fullStack :: m [v] -- only for debug purposes
+  fullStack :: m [v]
 
 newtype WStackT v m a = WStackT { getStackT :: S.StateT [v] m a }
              deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoinable, S.MonadState [v])
@@ -127,7 +126,7 @@ instance (WValue v, Monad m) => WStack (WStackT v m) v where
     case stack of
       first : rest -> S.put rest >> return first
       [] -> error "invalid program does not properly manage its stack"
-  fullStack = S.get
+  fullStack = reverse <$> S.get
 
 traceWithStack :: (WStack m v) => String -> m a -> m a
 traceWithStack msg m = do
@@ -186,22 +185,24 @@ runWithStub = runIdentityT . getStubT
 type WLinearMemory m a v = StoreM a v m
 
 data WEsc v = Return ![v]
-            | Break !Natural
-            | Error !DomainError
+            | Break !Natural ![v] -- break level and result stack
   deriving (Eq, Ord, Show)
 
 class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
   isReturn :: (BoolDomain b, BottomLattice b) => esc -> b
   isBreak :: (BoolDomain b, BottomLattice b, Show b) => esc -> b
-  getBreakLevel :: esc -> S.Set Natural
+  getBreakLevelAndStack :: esc -> [(Natural, [v])]
 
 instance (Ord v, Show v, Joinable v, BottomLattice v) => WEscape (S.Set (WEsc v)) v where
-  isReturn = joinMap $ \case Return _ -> true
-                             _ -> false
-  isBreak b = traceShowId ((joinMap $ \case Break _ -> true
-                                            _ -> false) b)
-  getBreakLevel s = S.fromList (mapMaybe (\case Break n -> Just n
-                                                _ -> Nothing) (S.elems s))
+  isReturn = joinMap $
+    \case Return _ -> true
+          _ -> false
+  isBreak = joinMap $
+    \case Break _ _ -> true
+          _ -> false
+  getBreakLevelAndStack s = mapMaybe extract (S.elems s)
+    where extract (Break level stack) = Just (level, stack)
+          extract _ = Nothing
 
 type WMonad m a v = (
   WAddress a,
@@ -286,18 +287,17 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   push (iBinOp bitSize binOp v1 v2)
 evalInstr rec (Wasm.Loop bt loopBody) =
   rec (LoopBody bt loopBody) >>= mapM_ push
-evalInstr rec (Wasm.Block bt blockBody) =
-  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak)
-  where handleBreak :: Esc m -> m ()
-        handleBreak b = mjoins (map (\l ->
-                                  if l == 0 then
-                                    push (i32 0) -- TODO: stack
+evalInstr rec (Wasm.Block bt blockBody) = do
+  arity <- blockReturnArity bt
+  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak arity)
+  where handleBreak :: Int -> Esc m -> m ()
+        handleBreak arity b = mjoins (map (\(level, stack) ->
+                                  if level == 0 then
+                                    mapM_ push (take arity stack)
                                   else
-                                    escape (Break (l - 1) :: WEsc v)) (S.elems levels))
-          where levels = getBreakLevel b
-
-
-evalInstr _ (Wasm.Br n) =
-   escape @m @(WEsc v) @() (Break n)
+                                    escape (Break (level - 1) stack)) (getBreakLevelAndStack b))
+evalInstr _ (Wasm.Br n) = do
+  stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
+  escape @m @(WEsc v) @() (Break n stack)
 
 evalInstr _ i = todo i

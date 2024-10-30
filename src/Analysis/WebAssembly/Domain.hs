@@ -29,8 +29,6 @@ class (Show v, Ord v) => WValue v where
   extern :: Maybe Natural -> v
   iBinOp :: BitSize -> IBinOp -> v -> v -> v
   break :: Natural -> v
-  decreaseBreakLevel :: v -> v
-  doesBreakCurrentBlock :: BoolDomain b => v -> b
 
 -- Implements binary operations on i32/i64
 -- XXX: This does not perfectly follow the WebAssembly semantics, for simplicity.
@@ -59,7 +57,6 @@ data ConstPropValue =
   | F64 !(CP Word64)
   | Func !(CP (Maybe Natural))
   | Extern !(CP (Maybe Natural))
-  | Break !(S.Set Natural)
   deriving (Show, Ord, Eq)
 
 instance WValue ConstPropValue where
@@ -86,12 +83,6 @@ instance WValue ConstPropValue where
   iBinOp BS64 binOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiBinOp binOp x y))
   iBinOp BS32 _ (I64 _) (I64 _) = I64 Top
   iBinOp _ _ _ _ = error "should never mistype binary operation"
-  break = Break . S.singleton
-  decreaseBreakLevel (Break n) = Break (S.map (\x -> x - 1) n)
-  decreaseBreakLevel _ = Bottom
-  doesBreakCurrentBlock (Break n) | n == S.singleton 0 = true
-                                  | S.member 0 n = boolTop
-  doesBreakCurrentBlock _ = false
 
 instance Joinable ConstPropValue where
   join Bottom x = x
@@ -102,7 +93,6 @@ instance Joinable ConstPropValue where
   join (F64 x) (F64 y) = F64 (join x y)
   join (Func x) (Func y) = Func (join x y)
   join (Extern x) (Extern y) = Extern (join x y)
-  join (Break x) (Break y) = Break (S.union x y)
   join x y = error $ "should never join elements of different types" ++ (show x) ++ ", " ++ (show y)
 
 instance Meetable ConstPropValue where
@@ -112,8 +102,6 @@ instance Meetable ConstPropValue where
   meet v@(F64 x) (F64 y) | x == y = v
   meet v@(Func x) (Func y) | x == y = v
   meet v@(Extern x) (Extern y) | x == y = v
-  meet (Break x) (Break y) | S.null (S.intersection x y) = Bottom
-  meet (Break x) (Break y) = Break (S.intersection x y)
   meet _ _ = Bottom
 
 instance PartialOrder ConstPropValue where

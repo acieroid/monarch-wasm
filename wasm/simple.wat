@@ -25,11 +25,20 @@
     i32.const 0)
 
   (export "br-with-stack" (func 3))
-  (func (;2;) (type 2) (param) (result i32)
+  (func (;3;) (type 2) (param) (result i32)
     block (result i32)
       i32.const 0
       br 0
     end)
+
+  (export "br-with-stack-two-values" (func 4))
+  (func (;4;) (type 2) (param) (result i32)
+    block (result i32 i32)
+      i32.const 1
+      i32.const 2
+      br 0
+    end
+    drop)
 
   (table (;0;) 1 1 funcref)
   (memory (;0;) 2)
