@@ -6,13 +6,14 @@ import Language.Wasm as Wasm
 import qualified Data.ByteString.Lazy as LBS
 import Control.Monad.IO.Class
 import Analysis.WebAssembly.Fixpoint (analyze, WasmCmp, WasmRes)
-import Data.Map (Map)
+import qualified Data.Map as M
 import Analysis.WebAssembly.Domain (ConstPropValue, SingleAddress)
+import Analysis.WebAssembly.Semantics (WasmBody(..))
 
 loadFile :: MonadIO m => FilePath -> m (Either String Module)
 loadFile = fmap Wasm.parse . (liftIO . LBS.readFile)
 
-run :: Module -> (Map (WasmCmp ConstPropValue) (WasmRes ConstPropValue), Map SingleAddress ConstPropValue)
+run :: Module -> (M.Map (WasmCmp ConstPropValue) (WasmRes ConstPropValue), M.Map SingleAddress ConstPropValue)
 run = analyze
 
 main :: IO ()
@@ -24,4 +25,7 @@ main = do
     Right m -> do
       let (returns, store) = run m
       putStrLn "Return values:"
-      print returns
+      mapM_ (\(k, v) -> case k of
+                (EntryFunction idx, ()) -> putStrLn $ show idx ++ ": " ++ show v
+                _ -> return ())
+        (M.assocs returns)

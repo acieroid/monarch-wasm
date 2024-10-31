@@ -6,7 +6,7 @@
 module Analysis.WebAssembly.Semantics (
   WasmBody(..), FunctionIndex,
   evalBody, WMonad, WStack, WStackT, WLocals, WGlobals, WasmModule, WEsc,
-  runWithWasmModule, runWithStack, runWithLocals, runWithStub
+  runWithWasmModule, runWithStack, runWithLocals, runWithGlobals
 ) where
 
 import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins)
@@ -168,18 +168,37 @@ class (WValue v, Monad m) => WGlobals m v | m -> v where
   setGlobal :: Natural -> v -> m ()
   getGlobal :: Natural -> m v
 
+newtype WGlobalsT v m a = WGlobalsT { getGlobalsT :: S.StateT (M.Map Natural v) m a }
+             deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (M.Map Natural v))
+
 instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t, Monad (t m)) => WGlobals (t m) v where
   setGlobal i = upperM . setGlobal i
   getGlobal = upperM . getGlobal
 
--- TODO: these are just stub instances for WStack, WGlobals and WLocals
--- implement these with a suitable instance, perhaps split them up too,
--- as they might need to be at different locations in the monad stack.
-newtype StubT v m a = StubT { getStubT :: IdentityT m a }
-             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoinable)
-instance (WValue v, Monad m) => WGlobals (StubT v m) v -- TODO: implement as Map
-runWithStub :: forall v m a . StubT v m a -> m a
-runWithStub = runIdentityT . getStubT
+instance (WValue v, Monad m) => WGlobals (WGlobalsT v m) v where
+  getGlobal k = do
+    globals <- S.get
+    case M.lookup k globals of
+      Just l -> return l
+      Nothing -> error "invalid program does not properly manage its globals"
+  setGlobal k v = S.get >>= S.put . M.insert k v
+
+runWithGlobals :: forall v m a . (WasmModule m, WValue v) => WGlobalsT v m a -> m a
+runWithGlobals l = do
+  m <- getModule
+  let globals = zipWith (\idx g -> (idx, runInitializer g)) [0..] (Wasm.globals m)
+  (r, _) <- S.runStateT (getGlobalsT l) (M.fromList globals)
+  return r
+  where typeOf g = case Wasm.globalType g of
+          Wasm.Const vt -> vt
+          Wasm.Mut vt -> vt
+        runInitializer g = case Wasm.initializer g of
+          [Wasm.I32Const n] -> i32 n
+          [Wasm.I64Const n] -> i64 n
+          [Wasm.F32Const n] -> f32 n
+          [Wasm.F64Const n] -> f64 n
+          -- ideally we'd call evalExpr and take the top value of the stack, but most initializers are just const, so we specialize it for simplicyt
+          _ -> error "unsupported non-const global initializer"
 
 -- We need to access the linear memory (the heap)
 type WLinearMemory m a v = StoreM a v m

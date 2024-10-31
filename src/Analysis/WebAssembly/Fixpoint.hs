@@ -5,7 +5,7 @@ module Analysis.WebAssembly.Fixpoint (
   WasmRes
   ) where
 import Analysis.WebAssembly.Domain (WDomain, WAddress (..), SingleAddress)
-import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithStub, WasmBody (..), FunctionIndex, runWithStack, WStackT, runWithLocals, WEsc)
+import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithGlobals, WasmBody (..), FunctionIndex, runWithStack, WStackT, runWithLocals, WEsc)
 import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), StoreM, iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
 import Control.Monad.Identity
 import Language.Wasm.Structure (Module(..), Export(..), ExportDesc(..))
@@ -54,7 +54,6 @@ intra cmp = runFixT @(IntraT (IntraAnalysisT (WasmCmp v) m) v) (evalBody @_ @a) 
            & runIntraAnalysis cmp
 
 inter :: forall m a v . InterM m a v => Module -> m ()
--- XXX: monarch paper defines inter = lftp intra, but I guess this is missing the entry point, hence, we might prefer the following
 -- Analyzes all exported function
 inter m = mapM_ (\x -> add (EntryFunction x, ())) exportedFuncs >> iterateWL (intra @_ @a)
   where exportedFuncs :: [FunctionIndex]
@@ -72,7 +71,6 @@ inter m = mapM_ (\x -> add (EntryFunction x, ())) exportedFuncs >> iterateWL (in
 -- Analyze a module, returning:
 -- - the resulting stack for each function
 -- - the linear memory
--- - TODO: the globals
 analyze :: forall a v . (a ~ SingleAddress, WDomain a v, Meetable v, BottomLattice v, PartialOrder v, Joinable v, Joinable v) => Module -> (Map (WasmCmp v) (WasmRes v), Map a v)
 analyze m = (returns, store)
   where ((((), store), returns), _) = inter @_ @a m
@@ -82,8 +80,8 @@ analyze m = (returns, store)
           & runWithDependencyTracking @(WasmCmp v) @(WasmCmp v)
           & runWithComponentTracking @(WasmCmp v)
           & runWithWorkList @[_] @(WasmCmp v)
+          & runWithGlobals
           & runWithWasmModule m
-          & runWithStub
           & runWithStack
           & runWithLocals
           & runIdentity

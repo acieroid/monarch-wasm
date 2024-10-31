@@ -23,12 +23,11 @@ class (Show v, Ord v) => WValue v where
   zero :: Wasm.ValueType -> v
   i32 :: Word32 -> v
   i64 :: Word64 -> v
-  f32 :: Word32 -> v
-  f64 :: Word64 -> v
+  f32 :: Float -> v
+  f64 :: Double -> v
   func :: Maybe Natural -> v
   extern :: Maybe Natural -> v
   iBinOp :: BitSize -> IBinOp -> v -> v -> v
-  break :: Natural -> v
 
 -- Implements binary operations on i32/i64
 -- XXX: This does not perfectly follow the WebAssembly semantics, for simplicity.
@@ -53,8 +52,8 @@ data ConstPropValue =
     Bottom
   | I32 !(CP Word32)
   | I64 !(CP Word64)
-  | F32 !(CP Word32)
-  | F64 !(CP Word64)
+  | F32 !(CP Float)
+  | F64 !(CP Double)
   | Func !(CP (Maybe Natural))
   | Extern !(CP (Maybe Natural))
   deriving (Show, Ord, Eq)
