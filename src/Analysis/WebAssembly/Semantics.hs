@@ -304,19 +304,20 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
   push (iBinOp bitSize binOp v1 v2)
-evalInstr rec (Wasm.Loop bt loopBody) =
-  rec (LoopBody bt loopBody) >>= mapM_ push
+evalInstr rec (Wasm.Loop bt loopBody) = do
+  arity <- blockReturnArity bt
+  (rec (LoopBody bt loopBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ @a arity)
 evalInstr rec (Wasm.Block bt blockBody) = do
   arity <- blockReturnArity bt
-  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak arity)
-  where handleBreak :: Int -> Esc m -> m ()
-        handleBreak arity b = mjoins (map (\(level, stack) ->
-                                  if level == 0 then
-                                    mapM_ push (take arity stack)
-                                  else
-                                    escape (Break (level - 1) stack)) (getBreakLevelAndStack b))
+  (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ @a arity)
+
 evalInstr _ (Wasm.Br n) = do
   stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
   escape @m @(WEsc v) @() (Break n stack)
 
 evalInstr _ i = todo i
+
+handleBreak :: forall m a v . WMonad m a v => Int -> Esc m -> m ()
+handleBreak arity b = mjoins (map (uncurry breakOrReturn) (getBreakLevelAndStack b))
+  where breakOrReturn 0 stack = mapM_ push (take arity stack)
+        breakOrReturn level stack = escape (Break (level - 1) stack)
