@@ -1,5 +1,4 @@
 {-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE InstanceSigs #-}
 module Analysis.WebAssembly.Domain (
   WValue(..),
   ConstPropValue,
@@ -8,7 +7,6 @@ import Lattice (Joinable (..), PartialOrder (..), BottomLattice (..))
 import Data.Word (Word32, Word64)
 import Numeric.Natural (Natural)
 import Lattice.Class (Meetable (..))
-import Language.Wasm.Structure (BitSize (..), IBinOp (..))
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
 import qualified Language.Wasm.Structure as Wasm
 import Lattice.ConstantPropagationLattice (CP(..))
@@ -22,26 +20,71 @@ class (Show v, Ord v) => WValue v where
   f64 :: Double -> v
   func :: Maybe Natural -> v
   extern :: Maybe Natural -> v
-  iBinOp :: BitSize -> IBinOp -> v -> v -> v
+  iBinOp :: Wasm.BitSize -> Wasm.IBinOp -> v -> v -> v
+  iRelOp :: Wasm.BitSize -> Wasm.IRelOp -> v -> v -> v
 
--- Implements binary operations on i32/i64
--- XXX: This does not perfectly follow the WebAssembly semantics, for simplicity.
-concreteiBinOp :: (Bits b, Integral b) => IBinOp -> b -> b -> b
-concreteiBinOp IAdd = (+)
-concreteiBinOp ISub = (-)
-concreteiBinOp IMul = (*)
-concreteiBinOp IDivU = div
-concreteiBinOp IDivS = div
-concreteiBinOp IRemU = rem
-concreteiBinOp IRemS = rem
-concreteiBinOp IAnd = (.&.)
-concreteiBinOp IOr = (.|.)
-concreteiBinOp IXor = xor
-concreteiBinOp IShl = \x y -> shiftL x (fromIntegral y)
-concreteiBinOp IShrU = \x y -> shiftR x (fromIntegral y)
-concreteiBinOp IShrS = \x y -> shiftR x (fromIntegral y)
-concreteiBinOp IRotl = \x y -> rotateL x (fromIntegral y)
-concreteiBinOp IRotr = \x y -> rotateR x (fromIntegral y)
+-- Implements binary operations on i32/i64. Heavily inspired from haskell-wasm's interpreter
+concreteiBinOp :: (Bits b, Integral b) => Wasm.IBinOp -> Wasm.BitSize -> b -> b -> b
+concreteiBinOp Wasm.IAdd _ v1 v2 = v1 + v2
+concreteiBinOp Wasm.ISub _ v1 v2 = v1 - v2
+concreteiBinOp Wasm.IMul _ v1 v2 = v1 * v2
+concreteiBinOp Wasm.IDivU _ v1 v2 = v1 `quot` v2
+concreteiBinOp Wasm.IDivS bs v1 v2 = asWordBitSize bs $ asIntBitSize bs v1 `quot` asIntBitSize bs v2
+concreteiBinOp Wasm.IRemU _ v1 v2 = v1 `rem` v2
+concreteiBinOp Wasm.IRemS bs v1 v2 = asWordBitSize bs $ asIntBitSize bs v1 `rem` asIntBitSize bs v2
+concreteiBinOp Wasm.IAnd _ v1 v2 = v1 .&. v2
+concreteiBinOp Wasm.IOr _ v1 v2 = v1 .|. v2
+concreteiBinOp Wasm.IXor _ v1 v2 = v1 `xor` v2
+concreteiBinOp Wasm.IShl bs v1 v2 = v1 `shiftL` (fromIntegral v2 `rem` bitSize bs)
+concreteiBinOp Wasm.IShrU bs v1 v2 = v1 `shiftR` (fromIntegral v2 `rem` bitSize bs)
+concreteiBinOp Wasm.IShrS bs v1 v2 = error "TODO: shrs" -- asWordBitSize bs $ asIntBitSize bs v1 `shiftR` (fromIntegral v2 `rem` bitSize bs)
+concreteiBinOp Wasm.IRotl _ v1 v2 = v1 `rotateL` fromIntegral v2
+concreteiBinOp Wasm.IRotr _ v1 v2 = v1 `rotateR` fromIntegral v2
+
+asInt32 :: (Integral b1, Integral b2) => b1 -> b2
+asInt32 w =
+    if w < 0x80000000
+    then fromIntegral w
+    else -1 * fromIntegral (0xFFFFFFFF - w + 1)
+
+asInt64 :: (Integral b1, Integral b2) => b1 -> b2
+asInt64 w =
+    if w < 0x8000000000000000
+    then fromIntegral w
+    else -1 * fromIntegral (0xFFFFFFFFFFFFFFFF - w + 1)
+
+asWord32 :: (Integral b1, Integral b2) => b1 -> b2
+asWord32 i
+    | i >= 0 = fromIntegral i
+    | otherwise = 0xFFFFFFFF - (fromIntegral (abs i)) + 1
+
+asWord64 :: (Integral b1, Integral b2) => b1 -> b2
+asWord64 i
+    | i >= 0 = fromIntegral i
+    | otherwise = 0xFFFFFFFFFFFFFFFF - (fromIntegral (abs i)) + 1
+
+asIntBitSize :: (Integral b1, Integral b2) => Wasm.BitSize -> b1 -> b2
+asIntBitSize Wasm.BS32 = asInt32
+asIntBitSize Wasm.BS64 = asInt64
+
+asWordBitSize :: (Integral b1, Integral b2) => Wasm.BitSize -> b1 -> b2
+asWordBitSize Wasm.BS32 = asWord32
+asWordBitSize Wasm.BS64 = asWord64
+
+bitSize Wasm.BS32 = 32
+bitSize Wasm.BS64 = 64
+
+concreteiRelOp :: (Bits b, Integral b) => Wasm.IRelOp -> Wasm.BitSize -> b -> b -> b
+concreteiRelOp Wasm.IEq _ v1 v2 = if v1 == v2 then 1 else 0
+concreteiRelOp Wasm.INe _ v1 v2 = if v1 /= v2 then 0 else 1
+concreteiRelOp Wasm.ILtU _ v1 v2 = if v1 < v2 then 1 else 0
+concreteiRelOp Wasm.ILtS bs v1 v2 = if asIntBitSize bs v1 < asIntBitSize bs v2 then 1 else 0
+concreteiRelOp Wasm.IGtU _ v1 v2 = if v1 > v2 then 1 else 0
+concreteiRelOp Wasm.IGtS bs v1 v2 = if asIntBitSize bs v1 > asIntBitSize bs v2 then 1 else 0
+concreteiRelOp Wasm.ILeU _ v1 v2 = if v1 <= v2 then 1 else 0
+concreteiRelOp Wasm.ILeS bs v1 v2 = if asIntBitSize bs v1 <= asIntBitSize bs v2 then 1 else 0
+concreteiRelOp Wasm.IGeU _ v1 v2 = if v1 >= v2 then 1 else 0
+concreteiRelOp Wasm.IGeS bs v1 v2 = if asIntBitSize bs v1 >= asIntBitSize bs v2 then 1 else 0
 
 data ConstPropValue =
     Bottom
@@ -72,11 +115,16 @@ instance WValue ConstPropValue where
   f64 n = F64 (Constant n)
   func n = Func (Constant n)
   extern n = Extern (Constant n)
-  iBinOp BS32 binOp (I32 (Constant x)) (I32 (Constant y)) = I32 (Constant (concreteiBinOp binOp x y))
-  iBinOp BS32 _ (I32 _) (I32 _) = I32 Top
-  iBinOp BS64 binOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiBinOp binOp x y))
-  iBinOp BS32 _ (I64 _) (I64 _) = I64 Top
-  iBinOp _ _ _ _ = error "should never mistype binary operation"
+  iBinOp Wasm.BS32 binOp (I32 (Constant x)) (I32 (Constant y)) = I32 (Constant (concreteiBinOp binOp Wasm.BS32 x y))
+  iBinOp Wasm.BS32 _ (I32 _) (I32 _) = I32 Top
+  iBinOp Wasm.BS64 binOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiBinOp binOp Wasm.BS64 x y))
+  iBinOp Wasm.BS32 _ (I64 _) (I64 _) = I64 Top
+  iBinOp _ _ _ _ = error "iBinOp: should never mistype binary operation"
+  iRelOp Wasm.BS32 relOp (I32 (Constant x)) (I32 (Constant y)) = I32 (Constant (concreteiRelOp relOp Wasm.BS32 x y))
+  iRelOp Wasm.BS32 _ (I32 _) (I32 _) = I32 Top
+  iRelOp Wasm.BS64 relOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiRelOp relOp Wasm.BS64 x y))
+  iRelOp Wasm.BS64 _ (I64 _) (I64 _) = I64 Top
+  iRelOp _ _ _ _ = error "iRelOp: should never mistype relational operation"
 
 instance Joinable ConstPropValue where
   join Bottom x = x

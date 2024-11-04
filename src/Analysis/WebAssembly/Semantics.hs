@@ -135,7 +135,7 @@ traceWithStack msg m = do
     stackAfter <- fullStack
     trace (msg ++ ": " ++ show stackBefore ++ " -> " ++ show stackAfter) (return result)
 
-runWithStack :: forall v m a . WStackT v m a -> m (a, [v])
+runWithStack :: WStackT v m a -> m (a, [v])
 runWithStack = flip S.runStateT [] . getStackT
 
 -- We need to access local variables (local registers)
@@ -158,7 +158,7 @@ instance (WValue v, Monad m) => WLocals (WLocalsT v m) v where
       Nothing -> error "invalid program does not properly manage its locals"
   setLocal k v = S.get >>= S.put . M.insert k v
 
-runWithLocals :: forall v m a . Monad m => WLocalsT v m a -> m a
+runWithLocals :: Monad m => WLocalsT v m a -> m a
 runWithLocals l = do
   (r, _) <- S.runStateT (getLocalsT l) M.empty -- no locals initially, this will be populated upon function entry
   return r
@@ -183,7 +183,7 @@ instance (WValue v, Monad m) => WGlobals (WGlobalsT v m) v where
       Nothing -> error "invalid program does not properly manage its globals"
   setGlobal k v = S.get >>= S.put . M.insert k v
 
-runWithGlobals :: forall v m a . (WasmModule m, WValue v) => WGlobalsT v m a -> m a
+runWithGlobals :: (WasmModule m, WValue v) => WGlobalsT v m a -> m a
 runWithGlobals l = do
   m <- getModule
   let globals = zipWith (\idx g -> (idx, runInitializer g)) [0..] (Wasm.globals m)
@@ -208,9 +208,9 @@ newtype WSingleCellLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: S.
   deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState v)
 
 instance (WValue v, Monad m) => WLinearMemory (WSingleCellLinearMemoryT v m) v where
-  load memarg addr = S.get
+  load _ _ = S.get
 
-runWithSingleCellLinearMemory :: forall v m a . (WValue v, Monad m) => WSingleCellLinearMemoryT v m a -> m a
+runWithSingleCellLinearMemory :: (WValue v, Monad m) => WSingleCellLinearMemoryT v m a -> m a
 runWithSingleCellLinearMemory x = do
   (r, _) <- S.runStateT (getLinearMemoryT x) (i32 0)
   return r
@@ -224,7 +224,7 @@ class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
   isBreak :: (BoolDomain b, BottomLattice b, Show b) => esc -> b
   getBreakLevelAndStack :: esc -> [(Natural, [v])]
 
-instance (Ord v, Show v, Joinable v, BottomLattice v) => WEscape (S.Set (WEsc v)) v where
+instance (Ord v, Show v) => WEscape (S.Set (WEsc v)) v where
   isReturn = joinMap $
     \case Return _ -> true
           _ -> false
@@ -254,10 +254,10 @@ type WMonad m v = (
   BottomLattice (Esc m)
   )
 
-evalBody :: forall m v . WMonad m v => WasmBody -> m [v]
+evalBody :: WMonad m v => WasmBody -> m [v]
 evalBody = evalBody' call'
 
-applyFun :: forall m v . WMonad m v => (WasmBody -> m [v]) -> FunctionIndex -> (Wasm.FuncType -> m [v]) -> m [v]
+applyFun :: WMonad m v => (WasmBody -> m [v]) -> FunctionIndex -> (Wasm.FuncType -> m [v]) -> m [v]
 applyFun rec fidx getArgs = do
   m <- getModule
   let f = Wasm.functions m !! fromIntegral fidx
@@ -272,7 +272,7 @@ applyFun rec fidx getArgs = do
   traceWithStack ("after function, popping " ++ show nReturns) (evalFun rec f) -- run the function
   reverse <$> mapM (const pop) [0..(nReturns-1)] -- pop the results
 
-evalBody' :: forall m v . WMonad m v => (WasmBody -> m [v]) -> WasmBody -> m [v]
+evalBody' :: WMonad m v => (WasmBody -> m [v]) -> WasmBody -> m [v]
 evalBody' rec (Function fidx) = applyFun rec fidx (\t -> reverse <$> mapM (const pop) [0..((length (Wasm.params t))-1)])
 evalBody' rec (EntryFunction fidx) = applyFun rec fidx (return . map top . Wasm.params)
 evalBody' rec (BlockBody bt expr) = do
@@ -285,18 +285,18 @@ evalBody' rec (LoopBody bt expr) = do
   reverse <$> mapM (const pop) [0..(nReturns-1)]
 
 -- Evaluates a wasm function, leaving its results on the stack
-evalFun :: forall m v . WMonad m v => (WasmBody -> m [v]) -> Wasm.Function -> m ()
+evalFun :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Function -> m ()
 evalFun rec f = evalExpr rec f.body
 
 -- An "expression" is just a sequence of instructions
-evalExpr :: forall m v . WMonad m v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
+evalExpr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
 evalExpr rec = mapM_ (\i -> traceWithStack (show i) $ evalInstr rec i)
 
 todo :: Wasm.Instruction Natural -> a
 todo i = error ("Missing pattern for " ++ show i)
 
 -- This is where the basic semantics are all defined. An interesting aspect will be to handle the loops
-evalInstr :: forall m v . WMonad m v => (WasmBody -> m [v]) -> Wasm.Instruction Natural -> m ()
+evalInstr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Instruction Natural -> m ()
 evalInstr _ Wasm.Unreachable = return ()
 evalInstr _ Wasm.Nop = return ()
 evalInstr _ (Wasm.RefNull Wasm.FuncRef) = push (func Nothing)
@@ -315,24 +315,26 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
   push (iBinOp bitSize binOp v1 v2)
+evalInstr _ (Wasm.IRelOp bitSize relOp) = do
+  v1 <- pop
+  v2 <- pop
+  push (iRelOp bitSize relOp v1 v2)
 evalInstr rec (Wasm.Loop bt loopBody) = do
   (rec (LoopBody bt loopBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ f)
-  where f :: [v] -> m ()
-        f stack = do
+  where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
           -- TODO: evalInstr rec (Wasm.Loop bt loopBody)
 
 evalInstr rec (Wasm.Block bt blockBody) = do
   (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ f)
-  where f :: [v] -> m ()
-        f stack = do
+  where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
 
 evalInstr _ (Wasm.Br n) = do
   stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
-  escape @m @(WEsc v) @() (Break n stack)
+  escape (Break n stack)
 
 evalInstr _ (Wasm.F64Load memarg) = do
   a <- pop
@@ -341,7 +343,7 @@ evalInstr _ (Wasm.F64Load memarg) = do
 
 evalInstr _ i = todo i
 
-handleBreak :: forall m v . WMonad m v => ([v] -> m ()) -> Esc m -> m ()
+handleBreak :: WMonad m v => ([v] -> m ()) -> Esc m -> m ()
 handleBreak onBreak b = mjoins (map (uncurry breakOrReturn) (getBreakLevelAndStack b))
   where breakOrReturn 0 stack = onBreak stack
         breakOrReturn level stack = escape (Break (level - 1) stack)
