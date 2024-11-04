@@ -2,10 +2,7 @@
 {-# LANGUAGE InstanceSigs #-}
 module Analysis.WebAssembly.Domain (
   WValue(..),
-  WAddress(..),
-  WDomain,
   ConstPropValue,
-  SingleAddress,
   ) where
 import Lattice (Joinable (..), PartialOrder (..), BottomLattice (..))
 import Data.Word (Word32, Word64)
@@ -14,8 +11,6 @@ import Lattice.Class (Meetable (..))
 import Language.Wasm.Structure (BitSize (..), IBinOp (..))
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
 import qualified Language.Wasm.Structure as Wasm
-import qualified Data.Set as S
-import Domain.Core (BoolDomain(..))
 import Lattice.ConstantPropagationLattice (CP(..))
 
 class (Show v, Ord v) => WValue v where
@@ -92,7 +87,7 @@ instance Joinable ConstPropValue where
   join (F64 x) (F64 y) = F64 (join x y)
   join (Func x) (Func y) = Func (join x y)
   join (Extern x) (Extern y) = Extern (join x y)
-  join x y = error $ "should never join elements of different types" ++ (show x) ++ ", " ++ (show y)
+  join x y = error $ "should never join elements of different types" ++ show x ++ ", " ++ show y
 
 instance Meetable ConstPropValue where
   meet v@(I32 x) (I32 y) | x == y = v
@@ -114,15 +109,3 @@ instance PartialOrder ConstPropValue where
 
 instance BottomLattice ConstPropValue where
   bottom = Bottom
-
-class (Show a, Ord a) => WAddress a where
-  anyAddr :: a -- TODO: think how to best define it
-
--- A naive modeling of addresses, where all addresses are equal
-type SingleAddress = ()
-instance WAddress SingleAddress where
-  anyAddr = ()
-
-type WDomain address value = (
-  WAddress address,
-  WValue value)
