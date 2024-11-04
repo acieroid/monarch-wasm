@@ -340,6 +340,8 @@ evalInstr _ (Wasm.F64Load memarg) = do
   a <- pop
   v <- load memarg a
   push v
+evalInstr rec (Wasm.Call f) =
+  rec (Function f) >>= mapM_ push
 
 evalInstr _ i = todo i
 
