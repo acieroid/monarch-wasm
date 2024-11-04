@@ -10,8 +10,13 @@ import Lattice.Class (Meetable (..))
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
 import qualified Language.Wasm.Structure as Wasm
 import Lattice.ConstantPropagationLattice (CP(..))
+import Domain (BoolDomain, Domain)
+import Domain.Class (Domain(..))
+import Domain.Core (BoolDomain(..))
+import Lattice (justOrBot)
+import Control.Monad.Join (cond)
 
-class (Show v, Ord v) => WValue v where
+class (Show v, Ord v, BoolDomain v) => WValue v where
   top :: Wasm.ValueType -> v
   zero :: Wasm.ValueType -> v
   i32 :: Word32 -> v
@@ -95,6 +100,39 @@ data ConstPropValue =
   | Func !(CP (Maybe Natural))
   | Extern !(CP (Maybe Natural))
   deriving (Show, Ord, Eq)
+
+instance Domain ConstPropValue Bool where
+  inject True = I32 (Constant 1)
+  inject False = I32 (Constant 0)
+
+instance BoolDomain ConstPropValue where
+  isTrue (I32 (Constant 0)) = False
+  isTrue (I32 _) = True
+  isTrue (I64 (Constant 0)) = False
+  isTrue (I64 _) = True
+  isTrue (F32 (Constant 0)) = False
+  isTrue (F32 _) = True
+  isTrue (F64 (Constant 0)) = False
+  isTrue (F64 _) = True
+  isTrue _ = False
+  isFalse (I32 (Constant 0)) = True
+  isFalse (I32 (Constant _)) = False
+  isFalse (I32 Top) = True
+  isFalse (I64 (Constant 0)) = True
+  isFalse (I64 (Constant _)) = False
+  isFalse (I64 _) = True
+  isFalse (F32 (Constant 0)) = True
+  isFalse (F32 (Constant _)) = False
+  isFalse (F32 _) = True
+  isFalse (F64 (Constant 0)) = True
+  isFalse (F64 (Constant _)) = False
+  isFalse (F64 _) = True
+  isFalse _ = False
+  or a b = justOrBot $ cond (pure a) (pure a) (pure b)
+  and a b = justOrBot $ cond (pure a) (cond (pure b) (pure b) (pure false)) (pure false)
+  not v = join t f
+     where t = if isTrue  v then inject False else bottom
+           f = if isFalse v then inject True else bottom
 
 instance WValue ConstPropValue where
   top Wasm.I32 = I32 Top

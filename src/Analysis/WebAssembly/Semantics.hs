@@ -9,7 +9,7 @@ module Analysis.WebAssembly.Semantics (
   runWithWasmModule, runWithStack, runWithLocals, runWithGlobals, runWithSingleCellLinearMemory,
 ) where
 
-import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins)
+import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond)
 import qualified Language.Wasm.Structure as Wasm
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..))
@@ -324,7 +324,7 @@ evalInstr rec (Wasm.Loop bt loopBody) = do
   where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
-          -- TODO: evalInstr rec (Wasm.Loop bt loopBody)
+          evalInstr rec (Wasm.Loop bt loopBody)
 
 evalInstr rec (Wasm.Block bt blockBody) = do
   (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ f)
@@ -335,6 +335,9 @@ evalInstr rec (Wasm.Block bt blockBody) = do
 evalInstr _ (Wasm.Br n) = do
   stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
   escape (Break n stack)
+
+evalInstr rec (Wasm.BrIf n) =
+  cond pop (evalInstr rec (Wasm.Br n)) (return ())
 
 evalInstr _ (Wasm.F64Load memarg) = do
   a <- pop
