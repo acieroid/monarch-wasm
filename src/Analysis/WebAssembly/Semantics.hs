@@ -125,7 +125,7 @@ instance (WValue v, Monad m) => WStack (WStackT v m) v where
     stack <- S.get
     case stack of
       first : rest -> S.put rest >> return first
-      [] -> error "invalid program does not properly manage its stack"
+      [] -> error "invalid program does not properly manage its stack (empty when popping)"
   fullStack = reverse <$> S.get
 
 traceWithStack :: (WStack m v) => String -> m a -> m a
@@ -290,7 +290,7 @@ evalFun rec f = evalExpr rec f.body
 
 -- An "expression" is just a sequence of instructions
 evalExpr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
-evalExpr rec = mapM_ (\i -> traceWithStack (show i) $ evalInstr rec i)
+evalExpr rec = mapM_ (\i -> traceWithStack (show i) (return ()) >> evalInstr rec i)
 
 todo :: Wasm.Instruction Natural -> a
 todo i = error ("Missing pattern for " ++ show i)
@@ -325,20 +325,17 @@ evalInstr rec (Wasm.Loop bt loopBody) = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
           evalInstr rec (Wasm.Loop bt loopBody)
-
 evalInstr rec (Wasm.Block bt blockBody) = do
   (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ f)
   where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
-
 evalInstr _ (Wasm.Br n) = do
   stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
   escape (Break n stack)
-
-evalInstr rec (Wasm.BrIf n) =
-  cond pop (evalInstr rec (Wasm.Br n)) (return ())
-
+evalInstr rec (Wasm.BrIf n) = do
+  v <- pop
+  cond (return v) (evalInstr rec (Wasm.Br n)) (return ())
 evalInstr _ (Wasm.F64Load memarg) = do
   a <- pop
   v <- load memarg a
