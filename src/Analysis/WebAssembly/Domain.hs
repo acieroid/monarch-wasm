@@ -16,7 +16,7 @@ import Domain.Core (BoolDomain(..))
 import Lattice (justOrBot)
 import Control.Monad.Join (cond)
 
-class (Show v, Ord v, BoolDomain v) => WValue v where
+class (Show v, Ord v, BoolDomain v, Joinable v) => WValue v where
   top :: Wasm.ValueType -> v
   zero :: Wasm.ValueType -> v
   i32 :: Word32 -> v

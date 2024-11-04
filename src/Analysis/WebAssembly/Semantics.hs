@@ -342,6 +342,9 @@ evalInstr _ (Wasm.F64Load memarg) = do
   push v
 evalInstr rec (Wasm.Call f) =
   rec (Function f) >>= mapM_ push
+evalInstr rec (Wasm.If bt consequent alternative) = do
+  v <- pop
+  cond (return v) (rec (BlockBody bt consequent) >>= mapM_ push) (rec (BlockBody bt alternative) >>= mapM_ push)
 
 evalInstr _ i = todo i
 
