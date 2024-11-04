@@ -70,6 +70,7 @@ library:
     - layers-mtl
     - wasm
     - bytestring
+    - ieee754
 
 executables:
   interpreter-exe:

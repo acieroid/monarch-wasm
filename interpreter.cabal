@@ -60,6 +60,7 @@ library
     , concurrency
     , containers
     , exceptions
+    , ieee754
     , layers-mtl
     , lens
     , maf2-analysis

@@ -4,6 +4,7 @@ module Analysis.WebAssembly.Domain (
   ConstPropValue,
   ) where
 import Lattice (Joinable (..), PartialOrder (..), BottomLattice (..))
+import Numeric.IEEE (IEEE, copySign, minNum, maxNum, identicalIEEE)
 import Data.Word (Word32, Word64)
 import Numeric.Natural (Natural)
 import Lattice.Class (Meetable (..))
@@ -26,6 +27,7 @@ class (Show v, Ord v, BoolDomain v, Joinable v) => WValue v where
   func :: Maybe Natural -> v
   extern :: Maybe Natural -> v
   iBinOp :: Wasm.BitSize -> Wasm.IBinOp -> v -> v -> v
+  fBinOp :: Wasm.BitSize -> Wasm.FBinOp -> v -> v -> v
   iRelOp :: Wasm.BitSize -> Wasm.IRelOp -> v -> v -> v
 
 -- Implements binary operations on i32/i64. Heavily inspired from haskell-wasm's interpreter
@@ -45,6 +47,26 @@ concreteiBinOp Wasm.IShrU bs v1 v2 = v1 `shiftR` (fromIntegral v2 `rem` bitSize 
 concreteiBinOp Wasm.IShrS bs v1 v2 = error "TODO: shrs" -- asWordBitSize bs $ asIntBitSize bs v1 `shiftR` (fromIntegral v2 `rem` bitSize bs)
 concreteiBinOp Wasm.IRotl _ v1 v2 = v1 `rotateL` fromIntegral v2
 concreteiBinOp Wasm.IRotr _ v1 v2 = v1 `rotateR` fromIntegral v2
+
+concretefBinOp :: (IEEE b) => Wasm.FBinOp -> Wasm.BitSize -> b -> b -> b
+concretefBinOp Wasm.FAdd _ v1 v2 = v1 + v2
+concretefBinOp Wasm.FSub _ v1 v2 = v1 - v2
+concretefBinOp Wasm.FMul _ v1 v2 = v1 * v2
+concretefBinOp Wasm.FMin _ v1 v2 = zeroAwareMin v1 v2
+concretefBinOp Wasm.FMax _ v1 v2 = zeroAwareMax v1 v2
+concretefBinOp Wasm.FCopySign _ v1 v2 = copySign v1 v2
+
+concreteiRelOp :: (Bits b, Integral b) => Wasm.IRelOp -> Wasm.BitSize -> b -> b -> b
+concreteiRelOp Wasm.IEq _ v1 v2 = if v1 == v2 then 1 else 0
+concreteiRelOp Wasm.INe _ v1 v2 = if v1 /= v2 then 0 else 1
+concreteiRelOp Wasm.ILtU _ v1 v2 = if v1 < v2 then 1 else 0
+concreteiRelOp Wasm.ILtS bs v1 v2 = if asIntBitSize bs v1 < asIntBitSize bs v2 then 1 else 0
+concreteiRelOp Wasm.IGtU _ v1 v2 = if v1 > v2 then 1 else 0
+concreteiRelOp Wasm.IGtS bs v1 v2 = if asIntBitSize bs v1 > asIntBitSize bs v2 then 1 else 0
+concreteiRelOp Wasm.ILeU _ v1 v2 = if v1 <= v2 then 1 else 0
+concreteiRelOp Wasm.ILeS bs v1 v2 = if asIntBitSize bs v1 <= asIntBitSize bs v2 then 1 else 0
+concreteiRelOp Wasm.IGeU _ v1 v2 = if v1 >= v2 then 1 else 0
+concreteiRelOp Wasm.IGeS bs v1 v2 = if asIntBitSize bs v1 >= asIntBitSize bs v2 then 1 else 0
 
 asInt32 :: (Integral b1, Integral b2) => b1 -> b2
 asInt32 w =
@@ -78,18 +100,39 @@ asWordBitSize Wasm.BS64 = asWord64
 
 bitSize Wasm.BS32 = 32
 bitSize Wasm.BS64 = 64
+nearest :: (IEEE a) => a -> a
+nearest f
+    | isNaN f = f
+    | f >= 0 && f <= 0.5 = copySign 0 f
+    | f < 0 && f >= -0.5 = -0
+    | otherwise =
+        let i = floor f :: Integer in
+        let fi = fromIntegral i in
+        let r = abs f - abs fi in
+        flip copySign f $ (
+            if r == 0.5
+            then (
+                case (even i, f < 0) of
+                    (True, _) -> fi
+                    (_, True) -> fi - 1.0
+                    (_, False) -> fi + 1.0
+            )
+            else fromIntegral (round f :: Integer)
+        )
 
-concreteiRelOp :: (Bits b, Integral b) => Wasm.IRelOp -> Wasm.BitSize -> b -> b -> b
-concreteiRelOp Wasm.IEq _ v1 v2 = if v1 == v2 then 1 else 0
-concreteiRelOp Wasm.INe _ v1 v2 = if v1 /= v2 then 0 else 1
-concreteiRelOp Wasm.ILtU _ v1 v2 = if v1 < v2 then 1 else 0
-concreteiRelOp Wasm.ILtS bs v1 v2 = if asIntBitSize bs v1 < asIntBitSize bs v2 then 1 else 0
-concreteiRelOp Wasm.IGtU _ v1 v2 = if v1 > v2 then 1 else 0
-concreteiRelOp Wasm.IGtS bs v1 v2 = if asIntBitSize bs v1 > asIntBitSize bs v2 then 1 else 0
-concreteiRelOp Wasm.ILeU _ v1 v2 = if v1 <= v2 then 1 else 0
-concreteiRelOp Wasm.ILeS bs v1 v2 = if asIntBitSize bs v1 <= asIntBitSize bs v2 then 1 else 0
-concreteiRelOp Wasm.IGeU _ v1 v2 = if v1 >= v2 then 1 else 0
-concreteiRelOp Wasm.IGeS bs v1 v2 = if asIntBitSize bs v1 >= asIntBitSize bs v2 then 1 else 0
+zeroAwareMin :: IEEE a => a -> a -> a
+zeroAwareMin a b
+    | identicalIEEE a 0 && identicalIEEE b (-0) = b
+    | isNaN a = a
+    | isNaN b = b
+    | otherwise = minNum a b
+
+zeroAwareMax :: IEEE a => a -> a -> a
+zeroAwareMax a b
+    | identicalIEEE a (-0) && identicalIEEE b 0 = b
+    | isNaN a = a
+    | isNaN b = b
+    | otherwise = maxNum a b
 
 data ConstPropValue =
     Bottom
@@ -156,8 +199,13 @@ instance WValue ConstPropValue where
   iBinOp Wasm.BS32 binOp (I32 (Constant x)) (I32 (Constant y)) = I32 (Constant (concreteiBinOp binOp Wasm.BS32 x y))
   iBinOp Wasm.BS32 _ (I32 _) (I32 _) = I32 Top
   iBinOp Wasm.BS64 binOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiBinOp binOp Wasm.BS64 x y))
-  iBinOp Wasm.BS32 _ (I64 _) (I64 _) = I64 Top
+  iBinOp Wasm.BS64 _ (I64 _) (I64 _) = I64 Top
   iBinOp _ _ _ _ = error "iBinOp: should never mistype binary operation"
+  fBinOp Wasm.BS32 binOp (F32 (Constant x)) (F32 (Constant y)) = F32 (Constant (concretefBinOp binOp Wasm.BS32 x y))
+  fBinOp Wasm.BS32 _ (F32 _) (F32 _) = F32 Top
+  fBinOp Wasm.BS64 binOp (F64 (Constant x)) (F64 (Constant y)) = F64 (Constant (concretefBinOp binOp Wasm.BS64 x y))
+  fBinOp Wasm.BS64 _ (F64 _) (F64 _) = F64 Top
+  fBinOp bs binOp x y = error ("fBinOp: should never mistype binary operation" ++ show [show bs, show binOp, show x, show y])
   iRelOp Wasm.BS32 relOp (I32 (Constant x)) (I32 (Constant y)) = I32 (Constant (concreteiRelOp relOp Wasm.BS32 x y))
   iRelOp Wasm.BS32 _ (I32 _) (I32 _) = I32 Top
   iRelOp Wasm.BS64 relOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiRelOp relOp Wasm.BS64 x y))

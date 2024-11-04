@@ -290,7 +290,7 @@ evalFun rec f = evalExpr rec f.body
 
 -- An "expression" is just a sequence of instructions
 evalExpr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
-evalExpr rec = mapM_ (\i -> traceWithStack (show i) (return ()) >> evalInstr rec i)
+evalExpr rec = mapM_ (\i -> traceWithStack (show i) $ evalInstr rec i)
 
 todo :: Wasm.Instruction Natural -> a
 todo i = error ("Missing pattern for " ++ show i)
@@ -315,6 +315,10 @@ evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
   push (iBinOp bitSize binOp v1 v2)
+evalInstr _ (Wasm.FBinOp bitSize binOp) = do
+  v1 <- pop
+  v2 <- pop
+  push (fBinOp bitSize binOp v1 v2)
 evalInstr _ (Wasm.IRelOp bitSize relOp) = do
   v1 <- pop
   v2 <- pop
@@ -324,7 +328,7 @@ evalInstr rec (Wasm.Loop bt loopBody) = do
   where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
-          evalInstr rec (Wasm.Loop bt loopBody)
+          rec (LoopBody bt loopBody) >>= mapM_ push
 evalInstr rec (Wasm.Block bt blockBody) = do
   (rec (BlockBody bt blockBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ f)
   where f stack = do
