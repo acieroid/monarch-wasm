@@ -59,6 +59,7 @@ library
     , bytestring
     , concurrency
     , containers
+    , data-binary-ieee754
     , exceptions
     , ieee754
     , layers-mtl

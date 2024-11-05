@@ -71,6 +71,7 @@ library:
     - wasm
     - bytestring
     - ieee754
+    - data-binary-ieee754
 
 executables:
   interpreter-exe:

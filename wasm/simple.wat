@@ -46,6 +46,15 @@
     global.set 0
     global.get 0)
 
+  (export "memory" (func 6))
+  (func (;6;) (type 2) (param) (result i32)
+    i32.const 42
+    f64.load
+    f64.const 0
+    f64.mul
+    drop
+    i32.const 0)
+
   (table (;0;) 1 1 funcref)
   (memory (;0;) 2)
   (global (;0;) (mut i32) (i32.const 66560))

@@ -29,9 +29,11 @@ import Control.Monad.Escape (MonadEscape(..), escape, catchOn)
 import Domain (Domain, BoolDomain (..))
 import qualified Data.Set as S
 import Lattice.Split (SplitLattice)
-import Lattice.ConstantPropagationLattice (CP)
+import Lattice.ConstantPropagationLattice (CP (..))
 import Data.Maybe (mapMaybe)
 import Control.Monad.DomainError (DomainError)
+import Data.Word (Word64)
+import Data.Binary.IEEE754 (wordToDouble)
 
 type FunctionIndex = Natural -- as used in wasm package
 
@@ -194,25 +196,30 @@ runWithGlobals l = do
           [Wasm.I64Const n] -> i64 n
           [Wasm.F32Const n] -> f32 n
           [Wasm.F64Const n] -> f64 n
-          -- ideally we'd call evalExpr and take the top value of the stack, but most initializers are just const, so we specialize it for simplicyt
+          -- ideally we'd call evalExpr and take the top value of the stack, but most initializers are just const, so we specialize it for simplicity
           _ -> error "unsupported non-const global initializer"
 
 -- We need to access the linear memory (the heap)
 class (WValue v, Monad m) => WLinearMemory m v | m -> v where
-  load :: Wasm.MemArg -> v -> m v
+  load_f64 :: Wasm.MemArg -> v -> m v
 
 instance {-# OVERLAPPABLE #-} (WLinearMemory m v, MonadLayer t, Monad (t m)) => WLinearMemory (t m) v where
-  load memarg = upperM . load memarg
+  load_f64 memarg = upperM . load_f64 memarg
 
-newtype WSingleCellLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: S.StateT v m a }
-  deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState v)
+newtype WSingleCellLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: S.StateT (CP Word64) m a }
+  deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (CP Word64))
 
 instance (WValue v, Monad m) => WLinearMemory (WSingleCellLinearMemoryT v m) v where
-  load _ _ = S.get
+  load_f64 _memarg _addr = do
+    memory <- S.get
+    return $ case memory of
+      Constant x -> f64 (wordToDouble x)
+      Top -> top Wasm.F64
+
 
 runWithSingleCellLinearMemory :: (WValue v, Monad m) => WSingleCellLinearMemoryT v m a -> m a
 runWithSingleCellLinearMemory x = do
-  (r, _) <- S.runStateT (getLinearMemoryT x) (i32 0)
+  (r, _) <- S.runStateT (getLinearMemoryT x) (Constant 0)
   return r
 
 data WEsc v = Return ![v]
@@ -311,6 +318,9 @@ evalInstr _ (Wasm.TeeLocal i) = do
 evalInstr _ (Wasm.GetGlobal i) = getGlobal i >>= push
 evalInstr _ (Wasm.SetGlobal i) = pop >>= setGlobal i
 evalInstr _ (Wasm.I32Const n) = push (i32 n)
+evalInstr _ (Wasm.I64Const n) = push (i64 n)
+evalInstr _ (Wasm.F32Const n) = push (f32 n)
+evalInstr _ (Wasm.F64Const n) = push (f64 n)
 evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
@@ -342,7 +352,7 @@ evalInstr rec (Wasm.BrIf n) = do
   cond (return v) (evalInstr rec (Wasm.Br n)) (return ())
 evalInstr _ (Wasm.F64Load memarg) = do
   a <- pop
-  v <- load memarg a
+  v <- load_f64 memarg a
   push v
 evalInstr rec (Wasm.Call f) =
   rec (Function f) >>= mapM_ push
