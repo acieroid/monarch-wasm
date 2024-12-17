@@ -29,6 +29,7 @@ class (Show v, Ord v, BoolDomain v, Joinable v) => WValue v where
   iBinOp :: Wasm.BitSize -> Wasm.IBinOp -> v -> v -> v
   fBinOp :: Wasm.BitSize -> Wasm.FBinOp -> v -> v -> v
   iRelOp :: Wasm.BitSize -> Wasm.IRelOp -> v -> v -> v
+  fRelOp :: Wasm.BitSize -> Wasm.FRelOp -> v -> v -> v
 
 -- Implements binary operations on i32/i64. Heavily inspired from haskell-wasm's interpreter
 concreteiBinOp :: (Bits b, Integral b) => Wasm.IBinOp -> Wasm.BitSize -> b -> b -> b
@@ -48,7 +49,7 @@ concreteiBinOp Wasm.IShrS bs v1 v2 = error "TODO: shrs" -- asWordBitSize bs $ as
 concreteiBinOp Wasm.IRotl _ v1 v2 = v1 `rotateL` fromIntegral v2
 concreteiBinOp Wasm.IRotr _ v1 v2 = v1 `rotateR` fromIntegral v2
 
-concretefBinOp :: (IEEE b) => Wasm.FBinOp -> Wasm.BitSize -> b -> b -> b
+concretefBinOp :: IEEE b => Wasm.FBinOp -> Wasm.BitSize -> b -> b -> b
 concretefBinOp Wasm.FAdd _ v1 v2 = v1 + v2
 concretefBinOp Wasm.FSub _ v1 v2 = v1 - v2
 concretefBinOp Wasm.FMul _ v1 v2 = v1 * v2
@@ -67,6 +68,14 @@ concreteiRelOp Wasm.ILeU _ v1 v2 = if v1 <= v2 then 1 else 0
 concreteiRelOp Wasm.ILeS bs v1 v2 = if asIntBitSize bs v1 <= asIntBitSize bs v2 then 1 else 0
 concreteiRelOp Wasm.IGeU _ v1 v2 = if v1 >= v2 then 1 else 0
 concreteiRelOp Wasm.IGeS bs v1 v2 = if asIntBitSize bs v1 >= asIntBitSize bs v2 then 1 else 0
+
+concretefRelOp :: IEEE b => Wasm.FRelOp -> Wasm.BitSize -> b -> b -> b
+concretefRelOp Wasm.FEq _ v1 v2 = if v1 == v2 then 1 else 0
+concretefRelOp Wasm.FNe _ v1 v2 = if v1 /= v2 then 0 else 1
+concretefRelOp Wasm.FLt _ v1 v2 = if v1 < v2 then 1 else 0
+concretefRelOp Wasm.FGt _ v1 v2 = if v1 > v2 then 1 else 0
+concretefRelOp Wasm.FLe _ v1 v2 = if v1 <= v2 then 1 else 0
+concretefRelOp Wasm.FGe _ v1 v2 = if v1 >= v2 then 1 else 0
 
 asInt32 :: (Integral b1, Integral b2) => b1 -> b2
 asInt32 w =
@@ -211,6 +220,12 @@ instance WValue ConstPropValue where
   iRelOp Wasm.BS64 relOp (I64 (Constant x)) (I64 (Constant y)) = I64 (Constant (concreteiRelOp relOp Wasm.BS64 x y))
   iRelOp Wasm.BS64 _ (I64 _) (I64 _) = I64 Top
   iRelOp _ _ _ _ = error "iRelOp: should never mistype relational operation"
+
+  fRelOp Wasm.BS32 relOp (F32 (Constant x)) (F32 (Constant y)) = F32 (Constant (concretefRelOp relOp Wasm.BS32 x y))
+  fRelOp Wasm.BS32 _ (F32 _) (F32 _) = F32 Top
+  fRelOp Wasm.BS64 relOp (F64 (Constant x)) (F64 (Constant y)) = F64 (Constant (concretefRelOp relOp Wasm.BS64 x y))
+  fRelOp Wasm.BS64 _ (F64 _) (F64 _) = F64 Top
+  fRelOp _ _ _ _ = error "iRelOp: should never mistype relational operation"
 
 instance Joinable ConstPropValue where
   join Bottom x = x

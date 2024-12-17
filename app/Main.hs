@@ -18,14 +18,17 @@ run = analyze
 
 main :: IO ()
 main = do
-  fileName <- fmap head getArgs
-  loaded <- loadFile fileName
-  case loaded of
-    Left err -> putStrLn err
-    Right m -> do
-      let (returns, _store) = run m
-      putStrLn "Return values:"
-      mapM_ (\(k, v) -> case k of
-                (EntryFunction idx, ()) -> putStrLn $ show idx ++ ": " ++ show v
-                _ -> return ())
-        (M.assocs returns)
+  args <- getArgs
+  case args of
+    [fileName] -> do
+      loaded <- loadFile fileName
+      case loaded of
+       Left err -> putStrLn err
+       Right m -> do
+         let (returns, _store) = run m
+         putStrLn "Return values:"
+         mapM_ (\(k, v) -> case k of
+                   (EntryFunction idx, ()) -> putStrLn $ show idx ++ ": " ++ show v
+                   _ -> return ())
+           (M.assocs returns)
+    _ -> putStrLn "Provide a WebAssembly file as argument, for example: cabal run interpreter-exe ./wasm/simple.wat"

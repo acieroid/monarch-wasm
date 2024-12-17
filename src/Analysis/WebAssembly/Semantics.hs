@@ -10,7 +10,7 @@ module Analysis.WebAssembly.Semantics (
 ) where
 
 import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond)
-import qualified Language.Wasm.Structure as Wasm
+import qualified Language.Wasm.Structure as Wasm hiding (Export(..))
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..))
 import Prelude hiding (break, drop)
@@ -23,7 +23,7 @@ import qualified Data.Map as M
 import Debug.Trace
 import Analysis.Monad.ComponentTracking (spawn, ComponentTrackingM)
 import Analysis.Monad.Cache (cached)
-import Lattice (BottomLattice(bottom), Joinable, joinMap, joins)
+import Lattice (BottomLattice(bottom), Joinable (..), joinMap, joins)
 import Lattice.Class (Lattice)
 import Control.Monad.Escape (MonadEscape(..), escape, catchOn)
 import Domain (Domain, BoolDomain (..))
@@ -33,7 +33,7 @@ import Lattice.ConstantPropagationLattice (CP (..))
 import Data.Maybe (mapMaybe)
 import Control.Monad.DomainError (DomainError)
 import Data.Word (Word64)
-import Data.Binary.IEEE754 (wordToDouble)
+import Data.Binary.IEEE754 (wordToDouble, doubleToWord, wordToFloat)
 
 type FunctionIndex = Natural -- as used in wasm package
 
@@ -201,20 +201,53 @@ runWithGlobals l = do
 
 -- We need to access the linear memory (the heap)
 class (WValue v, Monad m) => WLinearMemory m v | m -> v where
+  load_i32 :: Wasm.MemArg -> v -> m v
+  store_i32 :: Wasm.MemArg -> v -> v -> m ()
+  load_i64 :: Wasm.MemArg -> v -> m v
+  store_i64 :: Wasm.MemArg -> v -> v -> m ()
+  load_f32 :: Wasm.MemArg -> v -> m v
+  store_f32 :: Wasm.MemArg -> v -> v -> m ()
   load_f64 :: Wasm.MemArg -> v -> m v
+  store_f64 :: Wasm.MemArg -> v -> v -> m ()
 
 instance {-# OVERLAPPABLE #-} (WLinearMemory m v, MonadLayer t, Monad (t m)) => WLinearMemory (t m) v where
+  load_i32 memarg = upperM . load_i32 memarg
+  store_i32 memarg a = upperM . store_i32 memarg a
+  load_i64 memarg = upperM . load_i64 memarg
+  store_i64 memarg a = upperM . store_i64 memarg a
+  load_f32 memarg = upperM . load_f32 memarg
+  store_f32 memarg a = upperM . store_f32 memarg a
   load_f64 memarg = upperM . load_f64 memarg
+  store_f64 memarg a = upperM . store_f64 memarg a
 
 newtype WSingleCellLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: S.StateT (CP Word64) m a }
   deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (CP Word64))
 
 instance (WValue v, Monad m) => WLinearMemory (WSingleCellLinearMemoryT v m) v where
+  load_i32 _memarg _addr = do
+    memory <- S.get
+    return $ case memory of
+      Constant x -> top Wasm.I32 -- f32 (wordToFloat x) -- TODO: word64 to word32 (keep only first 32 bytes)
+      Top -> top Wasm.I32
+  store_i32 _memarg _addr _v = S.put Top -- very over-approximative
+  load_i64 _memarg _addr = do
+    memory <- S.get
+    return $ case memory of
+      Constant x -> i64 x
+      Top -> top Wasm.F64
+  store_i64 _memarg _addr _v = S.put Top -- very over-approximative
+  load_f32 _memarg _addr = do
+    memory <- S.get
+    return $ case memory of
+      Constant x -> top Wasm.F32 -- f32 (wordToFloat x) -- TODO: word64 to word32 (keep only first 32 bytes)
+      Top -> top Wasm.F32
+  store_f32 _memarg _addr _v = S.put Top -- very over-approximative
   load_f64 _memarg _addr = do
     memory <- S.get
     return $ case memory of
       Constant x -> f64 (wordToDouble x)
       Top -> top Wasm.F64
+  store_f64 _memarg _addr _v = S.put Top -- very over-approximative
 
 
 runWithSingleCellLinearMemory :: (WValue v, Monad m) => WSingleCellLinearMemoryT v m a -> m a
@@ -264,10 +297,16 @@ type WMonad m v = (
 evalBody :: WMonad m v => WasmBody -> m [v]
 evalBody = evalBody' call'
 
+isFuncImport :: Wasm.Import -> Bool
+isFuncImport i = isFuncImport' (Wasm.desc i)
+  where isFuncImport' (Wasm.ImportFunc _) = True
+        isFuncImport' _ = False
+
 applyFun :: WMonad m v => (WasmBody -> m [v]) -> FunctionIndex -> (Wasm.FuncType -> m [v]) -> m [v]
 applyFun rec fidx getArgs = do
   m <- getModule
-  let f = Wasm.functions m !! fromIntegral fidx
+  let nImportedFuncs = length (filter isFuncImport (Wasm.imports m))
+  let f = Wasm.functions m !! (fromIntegral fidx + nImportedFuncs)
   let t = Wasm.types m !! fromIntegral (Wasm.funcType f)
   let nParams = length (Wasm.params t)
   let nReturns = length (Wasm.results t)
@@ -321,6 +360,14 @@ evalInstr _ (Wasm.I32Const n) = push (i32 n)
 evalInstr _ (Wasm.I64Const n) = push (i64 n)
 evalInstr _ (Wasm.F32Const n) = push (f32 n)
 evalInstr _ (Wasm.F64Const n) = push (f64 n)
+evalInstr _ Wasm.I32Eqz = do
+  v <- pop
+  cond (return v) (push (i32 0)) (push (i32 1))
+evalInstr _ (Wasm.Select x) = do
+  c <- pop
+  v1 <- pop
+  v2 <- pop
+  cond (return c) (push v2) (push v1)
 evalInstr _ (Wasm.IBinOp bitSize binOp) = do
   v1 <- pop
   v2 <- pop
@@ -333,6 +380,10 @@ evalInstr _ (Wasm.IRelOp bitSize relOp) = do
   v1 <- pop
   v2 <- pop
   push (iRelOp bitSize relOp v1 v2)
+evalInstr _ (Wasm.FRelOp bitSize relOp) = do
+  v1 <- pop
+  v2 <- pop
+  push (fRelOp bitSize relOp v1 v2)
 evalInstr rec (Wasm.Loop bt loopBody) = do
   (rec (LoopBody bt loopBody) >>= mapM_ push) `catchOn` (fromBL . isBreak, handleBreak @_ f)
   where f stack = do
@@ -350,10 +401,14 @@ evalInstr _ (Wasm.Br n) = do
 evalInstr rec (Wasm.BrIf n) = do
   v <- pop
   cond (return v) (evalInstr rec (Wasm.Br n)) (return ())
-evalInstr _ (Wasm.F64Load memarg) = do
+evalInstr _ (Wasm.I32Load memarg) = pop >>= load_i32 memarg >>= push
+evalInstr _ (Wasm.I64Load memarg) = pop >>= load_i64 memarg >>= push
+evalInstr _ (Wasm.F32Load memarg) = pop >>= load_f32 memarg >>= push
+evalInstr _ (Wasm.F64Load memarg) = pop >>= load_f64 memarg >>= push
+evalInstr _ (Wasm.F64Store memarg) = do
   a <- pop
-  v <- load_f64 memarg a
-  push v
+  v <- pop
+  store_f64 memarg a v
 evalInstr rec (Wasm.Call f) =
   rec (Function f) >>= mapM_ push
 evalInstr rec (Wasm.If bt consequent alternative) = do
