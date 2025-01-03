@@ -111,6 +111,12 @@ class (WValue v, Monad m) => WStack m v | m -> v where
     return ()
   fullStack :: m [v]
 
+pop2 :: (WStack m v) => m (v, v)
+pop2 = do
+  v1 <- pop
+  v2 <- pop
+  return (v1, v2)
+
 newtype WStackT v m a = WStackT { getStackT :: S.StateT [v] m a }
              deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoinable, S.MonadState [v])
 
@@ -199,61 +205,43 @@ runWithGlobals l = do
           -- ideally we'd call evalExpr and take the top value of the stack, but most initializers are just const, so we specialize it for simplicity
           _ -> error "unsupported non-const global initializer"
 
+
+data Size = Size8 | Size16 | Size32
+data Signedness = U | S
+
 -- We need to access the linear memory (the heap)
 class (WValue v, Monad m) => WLinearMemory m v | m -> v where
-  load_i32 :: Wasm.MemArg -> v -> m v
-  store_i32 :: Wasm.MemArg -> v -> v -> m ()
-  load_i64 :: Wasm.MemArg -> v -> m v
-  store_i64 :: Wasm.MemArg -> v -> v -> m ()
-  load_f32 :: Wasm.MemArg -> v -> m v
-  store_f32 :: Wasm.MemArg -> v -> v -> m ()
-  load_f64 :: Wasm.MemArg -> v -> m v
-  store_f64 :: Wasm.MemArg -> v -> v -> m ()
+  -- i32.load, i64.load, f32.load, f64.load
+  load :: Wasm.ValueType -> Wasm.MemArg -> v -> m v
+  -- i32.load8_s, i32.load8_u, i32.load16_s, i32.load16_u, etc.
+  load_ :: Wasm.ValueType -> Size -> Signedness -> Wasm.MemArg -> v -> m v
+  -- i32.store, i64.store, f32.store, f64.store
+  store :: Wasm.ValueType ->  Wasm.MemArg -> (v, v) -> m ()
+  -- i32.store8, i32.store16, i64.store8, i64.store16, i64.store32
+  store_ :: Wasm.ValueType -> Size -> Wasm.MemArg -> (v, v) -> m ()
 
 instance {-# OVERLAPPABLE #-} (WLinearMemory m v, MonadLayer t, Monad (t m)) => WLinearMemory (t m) v where
-  load_i32 memarg = upperM . load_i32 memarg
-  store_i32 memarg a = upperM . store_i32 memarg a
-  load_i64 memarg = upperM . load_i64 memarg
-  store_i64 memarg a = upperM . store_i64 memarg a
-  load_f32 memarg = upperM . load_f32 memarg
-  store_f32 memarg a = upperM . store_f32 memarg a
-  load_f64 memarg = upperM . load_f64 memarg
-  store_f64 memarg a = upperM . store_f64 memarg a
+  load vt memarg = upperM . load vt memarg
+  load_ vt size signed memarg = upperM . load_ vt size signed memarg
+  store vt memarg = upperM . store vt memarg
+  store_ vt size memarg = upperM . store_ vt size memarg
 
-newtype WSingleCellLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: S.StateT (CP Word64) m a }
-  deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (CP Word64))
+newtype WTopLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: IdentityT m a }
+  deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans)
 
-instance (WValue v, Monad m) => WLinearMemory (WSingleCellLinearMemoryT v m) v where
-  load_i32 _memarg _addr = do
-    memory <- S.get
-    return $ case memory of
-      Constant x -> top Wasm.I32 -- f32 (wordToFloat x) -- TODO: word64 to word32 (keep only first 32 bytes)
-      Top -> top Wasm.I32
-  store_i32 _memarg _addr _v = S.put Top -- very over-approximative
-  load_i64 _memarg _addr = do
-    memory <- S.get
-    return $ case memory of
-      Constant x -> i64 x
-      Top -> top Wasm.F64
-  store_i64 _memarg _addr _v = S.put Top -- very over-approximative
-  load_f32 _memarg _addr = do
-    memory <- S.get
-    return $ case memory of
-      Constant x -> top Wasm.F32 -- f32 (wordToFloat x) -- TODO: word64 to word32 (keep only first 32 bytes)
-      Top -> top Wasm.F32
-  store_f32 _memarg _addr _v = S.put Top -- very over-approximative
-  load_f64 _memarg _addr = do
-    memory <- S.get
-    return $ case memory of
-      Constant x -> f64 (wordToDouble x)
-      Top -> top Wasm.F64
-  store_f64 _memarg _addr _v = S.put Top -- very over-approximative
+instance (WValue v, Monad m) => WLinearMemory (WTopLinearMemoryT v m) v where
+  -- TODO: memarg offset of 1 means do +1 to the address
+  load vt _memarg _addr = return (top vt)
+  load_ vt _size _signed _memarg _addr = return (top vt)
+  store _vt _memarg _addr_v = return ()
+  store_ _vt _size _memarg _addr_v = return ()
 
+runWithSingleCellLinearMemory :: (WValue v, Monad m) => WTopLinearMemoryT v m a -> m a
+runWithSingleCellLinearMemory x = runIdentityT (getLinearMemoryT x)
 
-runWithSingleCellLinearMemory :: (WValue v, Monad m) => WSingleCellLinearMemoryT v m a -> m a
-runWithSingleCellLinearMemory x = do
-  (r, _) <- S.runStateT (getLinearMemoryT x) (Constant 0)
-  return r
+-- TODO: try a more precise implementation where memory is a map from i32 to
+-- bytes. reading an i32 makes it read 4 bytes. Bytes can be top. Reading the
+-- top address returns top.
 
 data WEsc v = Return ![v]
             | Break !Natural ![v] -- break level and result stack
@@ -401,14 +389,30 @@ evalInstr _ (Wasm.Br n) = do
 evalInstr rec (Wasm.BrIf n) = do
   v <- pop
   cond (return v) (evalInstr rec (Wasm.Br n)) (return ())
-evalInstr _ (Wasm.I32Load memarg) = pop >>= load_i32 memarg >>= push
-evalInstr _ (Wasm.I64Load memarg) = pop >>= load_i64 memarg >>= push
-evalInstr _ (Wasm.F32Load memarg) = pop >>= load_f32 memarg >>= push
-evalInstr _ (Wasm.F64Load memarg) = pop >>= load_f64 memarg >>= push
-evalInstr _ (Wasm.F64Store memarg) = do
-  a <- pop
-  v <- pop
-  store_f64 memarg a v
+evalInstr _ (Wasm.I32Load memarg) = pop >>= load Wasm.I32 memarg >>= push
+evalInstr _ (Wasm.I64Load memarg) = pop >>= load Wasm.I64 memarg >>= push
+evalInstr _ (Wasm.F32Load memarg) = pop >>= load Wasm.F32 memarg >>= push
+evalInstr _ (Wasm.F64Load memarg) = pop >>= load Wasm.F64 memarg >>= push
+
+evalInstr _ (Wasm.I32Load8S memarg) = pop >>= load_ Wasm.I32 Size8 S memarg >>= push
+evalInstr _ (Wasm.I32Load8U memarg) = pop >>= load_ Wasm.I32 Size8 U memarg >>= push
+evalInstr _ (Wasm.I32Load16S memarg) = pop >>= load_ Wasm.I32 Size16 S memarg >>= push
+evalInstr _ (Wasm.I32Load16U memarg) = pop >>= load_ Wasm.I32 Size16 U memarg >>= push
+evalInstr _ (Wasm.I64Load8S memarg) = pop >>= load_ Wasm.I64 Size8 S memarg >>= push
+evalInstr _ (Wasm.I64Load8U memarg) = pop >>= load_ Wasm.I64 Size8 U memarg >>= push
+evalInstr _ (Wasm.I64Load16S memarg) = pop >>= load_ Wasm.I64 Size16 S memarg >>= push
+evalInstr _ (Wasm.I64Load16U memarg) = pop >>= load_ Wasm.I64 Size16 U memarg >>= push
+evalInstr _ (Wasm.I64Load32S memarg) = pop >>= load_ Wasm.I64 Size32 S memarg >>= push
+evalInstr _ (Wasm.I64Load32U memarg) = pop >>= load_ Wasm.I64 Size32 U memarg >>= push
+evalInstr _ (Wasm.I32Store memarg) = pop2 >>= store Wasm.I32 memarg
+evalInstr _ (Wasm.I64Store memarg) = pop2 >>= store Wasm.I64 memarg
+evalInstr _ (Wasm.F32Store memarg) = pop2 >>= store Wasm.F32 memarg
+evalInstr _ (Wasm.F64Store memarg) = pop2 >>= store Wasm.F64 memarg
+evalInstr _ (Wasm.I32Store8 memarg) = pop2 >>= store_ Wasm.I32 Size8 memarg
+evalInstr _ (Wasm.I32Store16 memarg) = pop2 >>= store_ Wasm.I32 Size16 memarg
+evalInstr _ (Wasm.I64Store8 memarg) = pop2 >>= store_ Wasm.I64 Size8 memarg
+evalInstr _ (Wasm.I64Store16 memarg) = pop2 >>= store_ Wasm.I64 Size16 memarg
+evalInstr _ (Wasm.I64Store32 memarg) = pop2 >>= store_ Wasm.I64 Size32 memarg
 evalInstr rec (Wasm.Call f) =
   rec (Function f) >>= mapM_ push
 evalInstr rec (Wasm.If bt consequent alternative) = do

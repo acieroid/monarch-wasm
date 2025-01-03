@@ -5,7 +5,7 @@ module Analysis.WebAssembly.Domain (
   ) where
 import Lattice (Joinable (..), PartialOrder (..), BottomLattice (..))
 import Numeric.IEEE (IEEE, copySign, minNum, maxNum, identicalIEEE)
-import Data.Word (Word32, Word64)
+import Data.Word (Word8, Word32, Word64)
 import Numeric.Natural (Natural)
 import Lattice.Class (Meetable (..))
 import Data.Bits ((.&.), (.|.), xor, shiftL, shiftR, rotateL, rotateR, Bits)
@@ -30,6 +30,9 @@ class (Show v, Ord v, BoolDomain v, Joinable v) => WValue v where
   fBinOp :: Wasm.BitSize -> Wasm.FBinOp -> v -> v -> v
   iRelOp :: Wasm.BitSize -> Wasm.IRelOp -> v -> v -> v
   fRelOp :: Wasm.BitSize -> Wasm.FRelOp -> v -> v -> v
+
+  -- isTop :: v -> Bool
+  -- byte :: Int -> v -> Word8
 
 -- Implements binary operations on i32/i64. Heavily inspired from haskell-wasm's interpreter
 concreteiBinOp :: (Bits b, Integral b) => Wasm.IBinOp -> Wasm.BitSize -> b -> b -> b
@@ -118,7 +121,7 @@ nearest f
         let i = floor f :: Integer in
         let fi = fromIntegral i in
         let r = abs f - abs fi in
-        flip copySign f $ (
+        flip copySign f (
             if r == 0.5
             then (
                 case (even i, f < 0) of

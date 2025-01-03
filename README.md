@@ -6,10 +6,3 @@ To run on an example:
 cabal run interpreter-exe -- ./wasm/mandelbrot.wat 
 ```
 
-TODO:
-
-- [X] Load wasm binary
-- [X] Write simple domain
-- [ ] Write eval
-- [ ] Think about loops
-- [ ] Refine domain
