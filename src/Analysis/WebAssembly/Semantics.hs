@@ -9,7 +9,7 @@ module Analysis.WebAssembly.Semantics (
   runWithWasmModule, runWithStack, runWithLocals, runWithGlobals, runWithSingleCellLinearMemory,
 ) where
 
-import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond)
+import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond, mzero, mjoinMap)
 import qualified Language.Wasm.Structure as Wasm hiding (Export(..))
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..))
@@ -230,7 +230,6 @@ newtype WTopLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: IdentityT
   deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans)
 
 instance (WValue v, Monad m) => WLinearMemory (WTopLinearMemoryT v m) v where
-  -- TODO: memarg offset of 1 means do +1 to the address
   load vt _memarg _addr = return (top vt)
   load_ vt _size _signed _memarg _addr = return (top vt)
   store _vt _memarg _addr_v = return ()
@@ -242,6 +241,7 @@ runWithSingleCellLinearMemory x = runIdentityT (getLinearMemoryT x)
 -- TODO: try a more precise implementation where memory is a map from i32 to
 -- bytes. reading an i32 makes it read 4 bytes. Bytes can be top. Reading the
 -- top address returns top.
+-- NOTE: memarg offset of 1 means do +1 to the address
 
 data WEsc v = Return ![v]
             | Break !Natural ![v] -- break level and result stack
@@ -389,6 +389,23 @@ evalInstr _ (Wasm.Br n) = do
 evalInstr rec (Wasm.BrIf n) = do
   v <- pop
   cond (return v) (evalInstr rec (Wasm.Br n)) (return ())
+evalInstr rec (Wasm.BrTable table def) = do
+  v <- pop
+  -- br_table 1 2 3 means br 1 if the top value is 1, br 2 if the top value is 2, br 3 otherwise
+  mjoin
+    -- check each element of table for equality
+    (mjoinMap (\n -> cond (return (iRelOp Wasm.BS32 Wasm.IEq v (i32 (fromInteger (toInteger n)))))
+                          (evalInstr rec (Wasm.Br n))
+                          mzero)
+      table)
+    -- if no elements are equal, go do the default
+    -- if all n != v comparisons are definitely true: no elements are equal (must): go to default
+    -- if one n != v comparison is definitely false: there is one element equal (must): do not go to default
+    -- otherwise: we don't know (may): go to default
+    -- so, in short: if a single n != v comparison is false, don't go to default; otherwise go there
+    -- TODO: for now, out of simplicity, we always join with default
+    (evalInstr rec (Wasm.Br def))
+
 evalInstr _ (Wasm.I32Load memarg) = pop >>= load Wasm.I32 memarg >>= push
 evalInstr _ (Wasm.I64Load memarg) = pop >>= load Wasm.I64 memarg >>= push
 evalInstr _ (Wasm.F32Load memarg) = pop >>= load Wasm.F32 memarg >>= push
