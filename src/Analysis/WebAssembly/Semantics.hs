@@ -90,6 +90,9 @@ returnArity (EntryFunction idx) = returnArityFromIndex idx
 returnArity (BlockBody bt _) = blockReturnArity bt
 returnArity (LoopBody bt _) = blockReturnArity bt
 
+functionArity :: WasmModule m => Wasm.Function -> m Int
+functionArity f = returnArityFromIndex (Wasm.funcType f)
+
 -- We cannot rely on MonadFix, because it uses ComponentTracking's call which uses mzero
 -- but mzero is not what we want (it would be the empty list). Instead, we want the list containing
 -- bottom for each return type
@@ -251,6 +254,7 @@ class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
   isReturn :: (BoolDomain b, BottomLattice b) => esc -> b
   isBreak :: (BoolDomain b, BottomLattice b, Show b) => esc -> b
   getBreakLevelAndStack :: esc -> [(Natural, [v])]
+  getReturnStack :: esc -> [[v]]
 
 instance (Ord v, Show v) => WEscape (S.Set (WEsc v)) v where
   isReturn = joinMap $
@@ -261,6 +265,9 @@ instance (Ord v, Show v) => WEscape (S.Set (WEsc v)) v where
           _ -> false
   getBreakLevelAndStack s = mapMaybe extract (S.elems s)
     where extract (Break level stack) = Just (level, stack)
+          extract _ = Nothing
+  getReturnStack s = mapMaybe extract (S.elems s)
+    where extract (Return stack) = Just stack
           extract _ = Nothing
 
 type WMonad m v = (
@@ -320,7 +327,10 @@ evalBody' rec (LoopBody bt expr) = do
 
 -- Evaluates a wasm function, leaving its results on the stack
 evalFun :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Function -> m ()
-evalFun rec f = evalExpr rec f.body
+evalFun rec f = evalExpr rec f.body `catchOn` (fromBL . isReturn, handleReturn @_ handler)
+  where handler stack = do
+          arity <- functionArity f
+          mapM_ push (take arity stack)
 
 -- An "expression" is just a sequence of instructions
 evalExpr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
@@ -383,6 +393,9 @@ evalInstr rec (Wasm.Block bt blockBody) = do
   where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
+evalInstr _ Wasm.Return = do
+  stack <- fullStack
+  escape (Return stack)
 evalInstr _ (Wasm.Br n) = do
   stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
   escape (Break n stack)
@@ -410,7 +423,6 @@ evalInstr _ (Wasm.I32Load memarg) = pop >>= load Wasm.I32 memarg >>= push
 evalInstr _ (Wasm.I64Load memarg) = pop >>= load Wasm.I64 memarg >>= push
 evalInstr _ (Wasm.F32Load memarg) = pop >>= load Wasm.F32 memarg >>= push
 evalInstr _ (Wasm.F64Load memarg) = pop >>= load Wasm.F64 memarg >>= push
-
 evalInstr _ (Wasm.I32Load8S memarg) = pop >>= load_ Wasm.I32 Size8 S memarg >>= push
 evalInstr _ (Wasm.I32Load8U memarg) = pop >>= load_ Wasm.I32 Size8 U memarg >>= push
 evalInstr _ (Wasm.I32Load16S memarg) = pop >>= load_ Wasm.I32 Size16 S memarg >>= push
@@ -442,3 +454,6 @@ handleBreak :: WMonad m v => ([v] -> m ()) -> Esc m -> m ()
 handleBreak onBreak b = mjoins (map (uncurry breakOrReturn) (getBreakLevelAndStack b))
   where breakOrReturn 0 stack = onBreak stack
         breakOrReturn level stack = escape (Break (level - 1) stack)
+
+handleReturn :: WMonad m v => ([v] -> m ()) -> Esc m -> m ()
+handleReturn onReturn b = mjoins (map onReturn (getReturnStack b))

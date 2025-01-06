@@ -62,6 +62,19 @@
     i32.const 0
     select) ;; should result in 20
 
+  (export "return" (func 8))
+  (func (;8;) (type 2) (param) (result i32)
+    i32.const 20
+    return)
+
+  (export "return-from-block" (func 9))
+  (func (;9;) (type 2) (param) (result i32)
+    i32.const 0
+    block
+      i32.const 20
+      return
+    end)
+
 
   (table (;0;) 1 1 funcref)
   (memory (;0;) 2)
