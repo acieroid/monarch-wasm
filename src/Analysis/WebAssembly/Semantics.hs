@@ -52,7 +52,7 @@ deriving instance Ord Wasm.BitSize
 deriving instance Ord (Wasm.Instruction Natural)
 
 data WasmBody v =
-    Function !FunctionIndex [v]
+    Function !FunctionIndex ![v]
   | EntryFunction !FunctionIndex
   | BlockBody !Wasm.BlockType !Wasm.Expression
   | LoopBody !Wasm.BlockType !Wasm.Expression
@@ -76,20 +76,25 @@ instance (Monad m) => WasmModule (WasmModuleT m) where
 returnArityFromTypeIndex :: WasmModule m => Wasm.TypeIndex -> m Int
 returnArityFromTypeIndex idx = do
   m <- getModule
-  let actualType = Wasm.types m !! fromIntegral idx
-  return (length (Wasm.results actualType))
+  let tidx = fromIntegral idx
+  if tidx >= length (Wasm.types m) then
+    error ("unknown type: " ++ show idx)
+  else
+    return (length (Wasm.results (Wasm.types m !! tidx)))
 
--- TODO: Need to investigate, something strange going on here
 returnArityFromFunctionIndex :: WasmModule m => FunctionIndex -> m Int
 returnArityFromFunctionIndex idx = do
   m <- getModule
-  let f = Wasm.functions m !! fromIntegral idx
-  returnArityFromTypeIndex (Wasm.funcType f)
+  let fidx = fromIntegral idx
+  if fidx >= length (Wasm.functions m) then
+    error ("unknown function: " ++ show m)
+  else
+    returnArityFromTypeIndex (Wasm.funcType (Wasm.functions m !! fidx))
 
 blockReturnArity :: WasmModule m => Wasm.BlockType -> m Int
 blockReturnArity (Wasm.Inline Nothing) = return 0
 blockReturnArity (Wasm.Inline (Just _)) = return 1
-blockReturnArity (Wasm.TypeIndex idx) = returnArityFromFunctionIndex idx
+blockReturnArity (Wasm.TypeIndex idx) = returnArityFromTypeIndex idx
 
 returnArity :: WasmModule m => WasmBody v -> m Int
 returnArity (Function idx _) = returnArityFromFunctionIndex idx
@@ -314,7 +319,7 @@ isFuncImport i = isFuncImport' (Wasm.desc i)
 checkEmptyStack :: WMonad m v => m ()
 checkEmptyStack = do
   s <- fullStack
-  if null s then return () else error "stack not empty"
+  if null s then return () else error $ "stack not empty" ++ show s
 
 
 getFunction :: WMonad m v => FunctionIndex -> m Wasm.Function
@@ -342,9 +347,8 @@ applyFun rec fidx getArgs = do
   let locals = map zero localTypes
   mapM_ (\(i, v) -> setLocal (fromIntegral i) v) (zip [0..(nParams+nLocals)-1] (argsv++locals)) -- store arguments in locals
   traceWithStack ("---\nevalFun" ++ show fidx ++ "\n---")  $ evalFun rec fun -- run the function
-  res <- (traceShowId . reverse) <$> mapM (const pop) [0..(nReturns-1)] -- pop the results
-  -- Check that the stack is empty. If not, that means either a bug on our end, or an invalid program
-  checkEmptyStack
+  res <- reverse <$> mapM (const pop) [0..(nReturns-1)] -- pop the results
+  _ <- popAll -- functions can leave value on the stack that are not part of the return value. Get rid of them.
   return res
 
 evalBody' :: WMonad m v => (WasmBody v -> m [v]) -> WasmBody v -> m [v]
@@ -352,8 +356,7 @@ evalBody' rec (Function fidx args) = applyFun rec fidx (const args)
 evalBody' rec (EntryFunction fidx) = applyFun rec fidx (map top . Wasm.params)
 evalBody' rec (BlockBody bt expr) = do
   nReturns <- blockReturnArity bt
-  trace ("block body, type is " ++ show bt ++ " and arity is " ++ show nReturns) $
-    evalExpr rec expr
+  evalExpr rec expr
   reverse <$> mapM (const pop) [0..(nReturns-1)]
 evalBody' rec (LoopBody bt expr) = do
   nReturns <- blockReturnArity bt
