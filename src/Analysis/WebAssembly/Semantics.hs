@@ -51,8 +51,8 @@ deriving instance Ord Wasm.FRelOp
 deriving instance Ord Wasm.BitSize
 deriving instance Ord (Wasm.Instruction Natural)
 
-data WasmBody =
-    Function !FunctionIndex
+data WasmBody v =
+    Function !FunctionIndex [v]
   | EntryFunction !FunctionIndex
   | BlockBody !Wasm.BlockType !Wasm.Expression
   | LoopBody !Wasm.BlockType !Wasm.Expression
@@ -73,35 +73,42 @@ runWithWasmModule r (WasmModuleT m) = runReaderT m r
 instance (Monad m) => WasmModule (WasmModuleT m) where
    getModule = ask
 
-returnArityFromIndex :: WasmModule m => FunctionIndex -> m Int
-returnArityFromIndex idx = do
+returnArityFromTypeIndex :: WasmModule m => Wasm.TypeIndex -> m Int
+returnArityFromTypeIndex idx = do
   m <- getModule
   let actualType = Wasm.types m !! fromIntegral idx
   return (length (Wasm.results actualType))
 
+-- TODO: Need to investigate, something strange going on here
+returnArityFromFunctionIndex :: WasmModule m => FunctionIndex -> m Int
+returnArityFromFunctionIndex idx = do
+  m <- getModule
+  let f = Wasm.functions m !! fromIntegral idx
+  returnArityFromTypeIndex (Wasm.funcType f)
+
 blockReturnArity :: WasmModule m => Wasm.BlockType -> m Int
 blockReturnArity (Wasm.Inline Nothing) = return 0
 blockReturnArity (Wasm.Inline (Just _)) = return 1
-blockReturnArity (Wasm.TypeIndex idx) = returnArityFromIndex idx
+blockReturnArity (Wasm.TypeIndex idx) = returnArityFromFunctionIndex idx
 
-returnArity :: WasmModule m => WasmBody -> m Int
-returnArity (Function idx) = returnArityFromIndex idx
-returnArity (EntryFunction idx) = returnArityFromIndex idx
+returnArity :: WasmModule m => WasmBody v -> m Int
+returnArity (Function idx _) = returnArityFromFunctionIndex idx
+returnArity (EntryFunction idx) = returnArityFromFunctionIndex idx
 returnArity (BlockBody bt _) = blockReturnArity bt
 returnArity (LoopBody bt _) = blockReturnArity bt
 
 functionArity :: WasmModule m => Wasm.Function -> m Int
-functionArity f = returnArityFromIndex (Wasm.funcType f)
+functionArity f = returnArityFromTypeIndex (Wasm.funcType f)
 
 -- We cannot rely on MonadFix, because it uses ComponentTracking's call which uses mzero
 -- but mzero is not what we want (it would be the empty list). Instead, we want the list containing
 -- bottom for each return type
-call' :: forall m v . (BottomLattice v, WasmModule m, MonadCache m, MapM (Key m WasmBody) (Val m [v]) m, ComponentTrackingM m (Key m WasmBody)) => WasmBody -> m [v]
+call' :: forall m v . (BottomLattice v, WasmModule m, MonadCache m, MapM (Key m (WasmBody v)) (Val m [v]) m, ComponentTrackingM m (Key m (WasmBody v))) => WasmBody v -> m [v]
 call' body = do
   arity <- returnArity body
   k <- key body
   spawn k
-  m <- cached @m @WasmBody @[v] k
+  m <- cached @m @(WasmBody v) @[v] k
   maybe (return $ map (const bottom) [0..(arity-1)]) return m
 
 -- We need to access the stack
@@ -113,6 +120,7 @@ class (WValue v, Monad m) => WStack m v | m -> v where
     _ <- pop
     return ()
   fullStack :: m [v]
+  popAll :: m [v]
 
 pop2 :: (WStack m v) => m (v, v)
 pop2 = do
@@ -127,6 +135,7 @@ instance {-# OVERLAPPABLE #-} (WStack m v, MonadLayer t, Monad (t m)) => WStack 
   push = upperM . push
   pop = upperM pop
   fullStack = upperM fullStack
+  popAll = upperM popAll
 
 instance (WValue v, Monad m) => WStack (WStackT v m) v where
   push v = do
@@ -138,6 +147,10 @@ instance (WValue v, Monad m) => WStack (WStackT v m) v where
       first : rest -> S.put rest >> return first
       [] -> error "invalid program does not properly manage its stack (empty when popping)"
   fullStack = reverse <$> S.get
+  popAll = do
+    s <- fullStack
+    S.put []
+    return s
 
 traceWithStack :: (WStack m v) => String -> m a -> m a
 traceWithStack msg m = do
@@ -283,13 +296,13 @@ type WMonad m v = (
   WEscape (Esc m) v,
   SplitLattice (Esc m),
   Domain (Esc m) (WEsc v),
-  MapM (Key m WasmBody) (Val m [v]) m,
-  ComponentTrackingM m (Key m WasmBody),
+  MapM (Key m (WasmBody v)) (Val m [v]) m,
+  ComponentTrackingM m (Key m (WasmBody v)),
   BottomLattice v,
   BottomLattice (Esc m)
   )
 
-evalBody :: WMonad m v => WasmBody -> m [v]
+evalBody :: WMonad m v => WasmBody v -> m [v]
 evalBody = evalBody' call'
 
 isFuncImport :: Wasm.Import -> Bool
@@ -297,28 +310,50 @@ isFuncImport i = isFuncImport' (Wasm.desc i)
   where isFuncImport' (Wasm.ImportFunc _) = True
         isFuncImport' _ = False
 
-applyFun :: WMonad m v => (WasmBody -> m [v]) -> FunctionIndex -> (Wasm.FuncType -> m [v]) -> m [v]
-applyFun rec fidx getArgs = do
+
+checkEmptyStack :: WMonad m v => m ()
+checkEmptyStack = do
+  s <- fullStack
+  if null s then return () else error "stack not empty"
+
+
+getFunction :: WMonad m v => FunctionIndex -> m Wasm.Function
+getFunction fidx = do
   m <- getModule
   let nImportedFuncs = length (filter isFuncImport (Wasm.imports m))
-  let f = Wasm.functions m !! (fromIntegral fidx + nImportedFuncs)
-  let t = Wasm.types m !! fromIntegral (Wasm.funcType f)
+  let realIdx = fromIntegral fidx + nImportedFuncs
+  return $ Wasm.functions m !! realIdx
+
+getFunctionType :: WMonad m v => Wasm.Function -> m Wasm.FuncType
+getFunctionType fun = do
+  m <- getModule
+  return $ Wasm.types m !! fromIntegral (Wasm.funcType fun)
+
+applyFun :: WMonad m v => (WasmBody v -> m [v]) -> FunctionIndex -> (Wasm.FuncType -> [v]) -> m [v]
+applyFun rec fidx getArgs = do
+  fun <- getFunction fidx
+  t <- getFunctionType fun
   let nParams = length (Wasm.params t)
   let nReturns = length (Wasm.results t)
-  let localTypes = Wasm.localTypes f
+  let localTypes = Wasm.localTypes fun
   let nLocals = length localTypes
-  argsv <- getArgs t
+
+  let argsv = getArgs t
   let locals = map zero localTypes
   mapM_ (\(i, v) -> setLocal (fromIntegral i) v) (zip [0..(nParams+nLocals)-1] (argsv++locals)) -- store arguments in locals
-  traceWithStack ("after function, popping " ++ show nReturns) (evalFun rec f) -- run the function
-  reverse <$> mapM (const pop) [0..(nReturns-1)] -- pop the results
+  traceWithStack ("---\nevalFun" ++ show fidx ++ "\n---")  $ evalFun rec fun -- run the function
+  res <- (traceShowId . reverse) <$> mapM (const pop) [0..(nReturns-1)] -- pop the results
+  -- Check that the stack is empty. If not, that means either a bug on our end, or an invalid program
+  checkEmptyStack
+  return res
 
-evalBody' :: WMonad m v => (WasmBody -> m [v]) -> WasmBody -> m [v]
-evalBody' rec (Function fidx) = applyFun rec fidx (\t -> reverse <$> mapM (const pop) [0..((length (Wasm.params t))-1)])
-evalBody' rec (EntryFunction fidx) = applyFun rec fidx (return . map top . Wasm.params)
+evalBody' :: WMonad m v => (WasmBody v -> m [v]) -> WasmBody v -> m [v]
+evalBody' rec (Function fidx args) = applyFun rec fidx (const args)
+evalBody' rec (EntryFunction fidx) = applyFun rec fidx (map top . Wasm.params)
 evalBody' rec (BlockBody bt expr) = do
   nReturns <- blockReturnArity bt
-  traceWithStack "evalBody' block" $ evalExpr rec expr
+  trace ("block body, type is " ++ show bt ++ " and arity is " ++ show nReturns) $
+    evalExpr rec expr
   reverse <$> mapM (const pop) [0..(nReturns-1)]
 evalBody' rec (LoopBody bt expr) = do
   nReturns <- blockReturnArity bt
@@ -326,21 +361,21 @@ evalBody' rec (LoopBody bt expr) = do
   reverse <$> mapM (const pop) [0..(nReturns-1)]
 
 -- Evaluates a wasm function, leaving its results on the stack
-evalFun :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Function -> m ()
-evalFun rec f = evalExpr rec f.body `catchOn` (fromBL . isReturn, handleReturn @_ handler)
+evalFun :: WMonad m v => (WasmBody v -> m [v]) -> Wasm.Function -> m ()
+evalFun rec f = traceShow f evalExpr rec f.body `catchOn` (fromBL . isReturn, handleReturn @_ handler)
   where handler stack = do
           arity <- functionArity f
           mapM_ push (take arity stack)
 
 -- An "expression" is just a sequence of instructions
-evalExpr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Expression -> m ()
-evalExpr rec = mapM_ (\i -> traceWithStack (show i) $ evalInstr rec i)
+evalExpr :: WMonad m v => (WasmBody v -> m [v]) -> Wasm.Expression -> m ()
+evalExpr rec = mapM_ (\i -> traceWithStack ("evalInstr " ++ show i) (evalInstr rec i))
 
 todo :: Wasm.Instruction Natural -> a
 todo i = error ("Missing pattern for " ++ show i)
 
 -- This is where the basic semantics are all defined. An interesting aspect will be to handle the loops
-evalInstr :: WMonad m v => (WasmBody -> m [v]) -> Wasm.Instruction Natural -> m ()
+evalInstr :: WMonad m v => (WasmBody v -> m [v]) -> Wasm.Instruction Natural -> m ()
 evalInstr _ Wasm.Unreachable = return ()
 evalInstr _ Wasm.Nop = return ()
 evalInstr _ (Wasm.RefNull Wasm.FuncRef) = push (func Nothing)
@@ -393,12 +428,8 @@ evalInstr rec (Wasm.Block bt blockBody) = do
   where f stack = do
           arity <- blockReturnArity bt
           mapM_ push (take arity stack)
-evalInstr _ Wasm.Return = do
-  stack <- fullStack
-  escape (Return stack)
-evalInstr _ (Wasm.Br n) = do
-  stack <- fullStack -- extract the full stack to propagate it back to the block we escape from
-  escape (Break n stack)
+evalInstr _ Wasm.Return = popAll >>= (escape . Return)
+evalInstr _ (Wasm.Br n) = popAll >>= (escape . Break n)
 evalInstr rec (Wasm.BrIf n) = do
   v <- pop
   cond (return v) (evalInstr rec (Wasm.Br n)) (return ())
@@ -416,7 +447,7 @@ evalInstr rec (Wasm.BrTable table def) = do
     -- if one n != v comparison is definitely false: there is one element equal (must): do not go to default
     -- otherwise: we don't know (may): go to default
     -- so, in short: if a single n != v comparison is false, don't go to default; otherwise go there
-    -- TODO: for now, out of simplicity, we always join with default
+    -- TODO: for now, out of simplicity, we always join with default. This is safe but over-approximative
     (evalInstr rec (Wasm.Br def))
 
 evalInstr _ (Wasm.I32Load memarg) = pop >>= load Wasm.I32 memarg >>= push
@@ -442,8 +473,13 @@ evalInstr _ (Wasm.I32Store16 memarg) = pop2 >>= store_ Wasm.I32 Size16 memarg
 evalInstr _ (Wasm.I64Store8 memarg) = pop2 >>= store_ Wasm.I64 Size8 memarg
 evalInstr _ (Wasm.I64Store16 memarg) = pop2 >>= store_ Wasm.I64 Size16 memarg
 evalInstr _ (Wasm.I64Store32 memarg) = pop2 >>= store_ Wasm.I64 Size32 memarg
-evalInstr rec (Wasm.Call f) =
-  rec (Function f) >>= mapM_ push
+evalInstr rec (Wasm.Call f) = do
+  fun <- getFunction f
+  t <- getFunctionType fun
+  let nParams = length (Wasm.params t)
+  args <- reverse <$> mapM (const pop) [0..((length (Wasm.params t))-1)]
+  res <- rec (Function f args)
+  mapM_ push res
 evalInstr rec (Wasm.If bt consequent alternative) = do
   v <- pop
   cond (return v) (rec (BlockBody bt consequent) >>= mapM_ push) (rec (BlockBody bt alternative) >>= mapM_ push)
@@ -456,4 +492,4 @@ handleBreak onBreak b = mjoins (map (uncurry breakOrReturn) (getBreakLevelAndSta
         breakOrReturn level stack = escape (Break (level - 1) stack)
 
 handleReturn :: WMonad m v => ([v] -> m ()) -> Esc m -> m ()
-handleReturn onReturn b = mjoins (map onReturn (getReturnStack b))
+handleReturn onReturn b = trace "handleReturn" $ mjoins (map onReturn (getReturnStack b))

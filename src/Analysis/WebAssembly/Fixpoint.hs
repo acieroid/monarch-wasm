@@ -44,7 +44,7 @@ type InterM m v = (
   Joinable v
   )
 
-type WasmCmp v = Key (IntraT Identity v) WasmBody
+type WasmCmp v = Key (IntraT Identity v) (WasmBody v)
 type WasmRes v = Val (IntraT Identity v) [v]
 
 intra :: forall m v . InterM m v => WasmCmp v -> m ()

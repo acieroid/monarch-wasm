@@ -207,7 +207,7 @@
     i32.const 8320
     i32.add
     global.set 0
-    i32.const 0)
+    i32.const 42)
   (func (;3;) (type 2) (param i32 i32)
     (local i32 i32 i32 i32 i32 i32 i32 i32)
     i32.const 64
