@@ -7,7 +7,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Control.Monad.IO.Class
 import Analysis.WebAssembly.Fixpoint (analyze, WasmCmp, WasmRes)
 import qualified Data.Map as M
-import Analysis.WebAssembly.Domain (ConstPropValue)
+import Domain.WebAssembly (ConstPropValue)
 import Analysis.WebAssembly.Semantics (WasmBody(..))
 
 loadFile :: MonadIO m => FilePath -> m (Either String Module)

@@ -12,7 +12,7 @@ module Analysis.WebAssembly.Semantics (
 import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond, mbottom, mjoinMap)
 import qualified Language.Wasm.Structure as Wasm hiding (Export(..))
 import Numeric.Natural (Natural)
-import Analysis.WebAssembly.Domain (WValue (..))
+import Domain.WebAssembly.Class(WValue (..))
 import Prelude hiding (break, drop)
 import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
 import Analysis.Monad (StoreM, MonadCache (..), MapM (..))

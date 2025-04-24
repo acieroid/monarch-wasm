@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.37.0.
+-- This file has been generated from package.yaml by hpack version 0.38.0.
 --
 -- see: https://github.com/sol/hpack
 
@@ -17,7 +17,6 @@ license-file:   LICENSE
 build-type:     Simple
 extra-source-files:
     README.md
-    CHANGELOG.md
 
 source-repository head
   type: git
@@ -25,9 +24,12 @@ source-repository head
 
 library
   exposed-modules:
-      Analysis.WebAssembly.Domain
       Analysis.WebAssembly.Fixpoint
+      Analysis.WebAssembly.Monad
       Analysis.WebAssembly.Semantics
+      Domain.WebAssembly
+      Domain.WebAssembly.Class
+      Domain.WebAssembly.ConstantPropagation
   other-modules:
       Paths_interpreter
   autogen-modules:

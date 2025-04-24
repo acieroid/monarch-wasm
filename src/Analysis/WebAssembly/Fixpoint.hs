@@ -16,7 +16,7 @@ import Analysis.Monad.Fix (runFixT)
 import Lattice (Meetable, BottomLattice, Joinable)
 import Control.Monad.Escape (MayEscapeT)
 import Data.Set (Set)
-import Analysis.WebAssembly.Domain (WValue)
+import Domain.WebAssembly.Class (WValue)
 import Data.Typeable
 
 type IntraT m v = MonadStack '[
