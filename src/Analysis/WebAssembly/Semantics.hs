@@ -9,7 +9,7 @@ module Analysis.WebAssembly.Semantics (
   runWithWasmModule, runWithStack, runWithLocals, runWithGlobals, runWithSingleCellLinearMemory,
 ) where
 
-import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond, mzero, mjoinMap)
+import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond, mbottom, mjoinMap)
 import qualified Language.Wasm.Structure as Wasm hiding (Export(..))
 import Numeric.Natural (Natural)
 import Analysis.WebAssembly.Domain (WValue (..))
@@ -105,8 +105,8 @@ returnArity (LoopBody bt _) = blockReturnArity bt
 functionArity :: WasmModule m => Wasm.Function -> m Int
 functionArity f = returnArityFromTypeIndex (Wasm.funcType f)
 
--- We cannot rely on MonadFix, because it uses ComponentTracking's call which uses mzero
--- but mzero is not what we want (it would be the empty list). Instead, we want the list containing
+-- We cannot rely on MonadFix, because it uses ComponentTracking's call which uses mbottom
+-- but mbottom is not what we want (it would be the empty list). Instead, we want the list containing
 -- bottom for each return type
 call' :: forall m v . (BottomLattice v, WasmModule m, MonadCache m, MapM (Key m (WasmBody v)) (Val m [v]) m, ComponentTrackingM m (Key m (WasmBody v))) => WasmBody v -> m [v]
 call' body = do
@@ -443,7 +443,7 @@ evalInstr rec (Wasm.BrTable table def) = do
     -- check each element of table for equality
     (mjoinMap (\n -> cond (return (iRelOp Wasm.BS32 Wasm.IEq v (i32 (fromInteger (toInteger n)))))
                           (evalInstr rec (Wasm.Br n))
-                          mzero)
+                          mbottom)
       table)
     -- if no elements are equal, go do the default
     -- if all n != v comparisons are definitely true: no elements are equal (must): go to default

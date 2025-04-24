@@ -1,16 +1,16 @@
-with-compiler: ghc-9.4.8
+with-compiler: ghc-9.6.6
 packages: interpreter.cabal
 
 source-repository-package
    type: git
    location: https://github.com/softwarelanguageslab/monarch.git
-   tag: fb62875e0a8e1095dbda2693d018455cfc79d2d2
+   tag: faad70207a9487c20ca47a7681e82d388c2037e5
    subdir: maf2-syntax maf2-analysis maf2-domains
 
 source-repository-package
    type: git
    location: https://github.com/bramvdbogaerde/layers-mtl.git
-   tag: 5201fd1814053630f762c382a79e49b7bf14df8f
+   tag: e02ee49ca80b419595f14399c44c61db2327b2b9
 
 source-repository-package
    type: git
