@@ -9,10 +9,10 @@ module Analysis.WebAssembly.Semantics (
   runWithWasmModule, runWithStack, runWithLocals, runWithGlobals, runWithSingleCellLinearMemory,
 ) where
 
-import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond, mzero, mjoinMap)
+import Control.Monad.Join (MonadJoin (..), MonadJoinable(..), msplitOn, condCP, fromBL, mjoins, cond, mbottom, mjoinMap)
 import qualified Language.Wasm.Structure as Wasm hiding (Export(..))
 import Numeric.Natural (Natural)
-import Analysis.WebAssembly.Domain (WValue (..))
+import Domain.WebAssembly.Class(WValue (..))
 import Prelude hiding (break, drop)
 import Control.Monad.Layer (MonadLayer (upperM), MonadTrans)
 import Analysis.Monad (StoreM, MonadCache (..), MapM (..))
@@ -34,79 +34,10 @@ import Data.Maybe (mapMaybe)
 import Control.Monad.DomainError (DomainError)
 import Data.Word (Word64)
 import Data.Binary.IEEE754 (wordToDouble, doubleToWord, wordToFloat)
+import Analysis.WebAssembly.Monad
 
-type FunctionIndex = Natural -- as used in wasm package
-
--- We need a few Ord instances to get Ord on our WasmBody
-deriving instance Ord Wasm.ValueType
-deriving instance Ord Wasm.BlockType
-deriving instance Ord Wasm.ElemType
-deriving instance Ord Wasm.MemArg
-deriving instance Ord Wasm.IUnOp
-deriving instance Ord Wasm.IBinOp
-deriving instance Ord Wasm.IRelOp
-deriving instance Ord Wasm.FUnOp
-deriving instance Ord Wasm.FBinOp
-deriving instance Ord Wasm.FRelOp
-deriving instance Ord Wasm.BitSize
-deriving instance Ord (Wasm.Instruction Natural)
-
-data WasmBody v =
-    Function !FunctionIndex ![v]
-  | EntryFunction !FunctionIndex
-  | BlockBody !Wasm.BlockType !Wasm.Expression
-  | LoopBody !Wasm.BlockType !Wasm.Expression
-  deriving (Show, Eq, Ord)
-
--- A reader-like monad to get access to the entire program. Necessary to e.g., access types, jump targets, etc.
-class Monad m => WasmModule m where
-  getModule :: m Wasm.Module
-
-instance {-# OVERLAPPABLE #-} (WasmModule m, MonadLayer t, Monad (t m)) => WasmModule (t m) where
-  getModule = upperM getModule
-
-newtype WasmModuleT m a = WasmModuleT (ReaderT Wasm.Module m a)
-                        deriving (Functor, Applicative, Monad, MonadTrans, MonadLayer, MonadReader Wasm.Module)
-runWithWasmModule :: Wasm.Module -> WasmModuleT m a -> m a
-runWithWasmModule r (WasmModuleT m) = runReaderT m r
-
-instance (Monad m) => WasmModule (WasmModuleT m) where
-   getModule = ask
-
-returnArityFromTypeIndex :: WasmModule m => Wasm.TypeIndex -> m Int
-returnArityFromTypeIndex idx = do
-  m <- getModule
-  let tidx = fromIntegral idx
-  if tidx >= length (Wasm.types m) then
-    error ("unknown type: " ++ show idx)
-  else
-    return (length (Wasm.results (Wasm.types m !! tidx)))
-
-returnArityFromFunctionIndex :: WasmModule m => FunctionIndex -> m Int
-returnArityFromFunctionIndex idx = do
-  m <- getModule
-  let fidx = fromIntegral idx
-  if fidx >= length (Wasm.functions m) then
-    error ("unknown function: " ++ show m)
-  else
-    returnArityFromTypeIndex (Wasm.funcType (Wasm.functions m !! fidx))
-
-blockReturnArity :: WasmModule m => Wasm.BlockType -> m Int
-blockReturnArity (Wasm.Inline Nothing) = return 0
-blockReturnArity (Wasm.Inline (Just _)) = return 1
-blockReturnArity (Wasm.TypeIndex idx) = returnArityFromTypeIndex idx
-
-returnArity :: WasmModule m => WasmBody v -> m Int
-returnArity (Function idx _) = returnArityFromFunctionIndex idx
-returnArity (EntryFunction idx) = returnArityFromFunctionIndex idx
-returnArity (BlockBody bt _) = blockReturnArity bt
-returnArity (LoopBody bt _) = blockReturnArity bt
-
-functionArity :: WasmModule m => Wasm.Function -> m Int
-functionArity f = returnArityFromTypeIndex (Wasm.funcType f)
-
--- We cannot rely on MonadFix, because it uses ComponentTracking's call which uses mzero
--- but mzero is not what we want (it would be the empty list). Instead, we want the list containing
+-- We cannot rely on MonadFix, because it uses ComponentTracking's call which uses mbottom
+-- but mbottom is not what we want (it would be the empty list). Instead, we want the list containing
 -- bottom for each return type
 call' :: forall m v . (BottomLattice v, WasmModule m, MonadCache m, MapM (Key m (WasmBody v)) (Val m [v]) m, ComponentTrackingM m (Key m (WasmBody v))) => WasmBody v -> m [v]
 call' body = do
@@ -116,46 +47,6 @@ call' body = do
   m <- cached @m @(WasmBody v) @[v] k
   maybe (return $ map (const bottom) [0..(arity-1)]) return m
 
--- We need to access the stack
-class (WValue v, Monad m) => WStack m v | m -> v where
-  push :: v -> m ()
-  pop :: m v
-  drop :: m ()
-  drop = do
-    _ <- pop
-    return ()
-  fullStack :: m [v]
-  popAll :: m [v]
-
-pop2 :: (WStack m v) => m (v, v)
-pop2 = do
-  v1 <- pop
-  v2 <- pop
-  return (v1, v2)
-
-newtype WStackT v m a = WStackT { getStackT :: S.StateT [v] m a }
-             deriving (Applicative, Monad, Functor, MonadCache, MonadLayer, MonadTrans, MonadJoinable, S.MonadState [v])
-
-instance {-# OVERLAPPABLE #-} (WStack m v, MonadLayer t, Monad (t m)) => WStack (t m) v where
-  push = upperM . push
-  pop = upperM pop
-  fullStack = upperM fullStack
-  popAll = upperM popAll
-
-instance (WValue v, Monad m) => WStack (WStackT v m) v where
-  push v = do
-    stack <- S.get
-    S.put (v : stack)
-  pop = do
-    stack <- S.get
-    case stack of
-      first : rest -> S.put rest >> return first
-      [] -> error "invalid program does not properly manage its stack (empty when popping)"
-  fullStack = reverse <$> S.get
-  popAll = do
-    s <- fullStack
-    S.put []
-    return s
 
 traceWithStack :: (WStack m v) => String -> m a -> m a
 traceWithStack msg m = do
@@ -163,149 +54,6 @@ traceWithStack msg m = do
     result <- m
     stackAfter <- fullStack
     trace (msg ++ ": " ++ show stackBefore ++ " -> " ++ show stackAfter) (return result)
-
-runWithStack :: WStackT v m a -> m (a, [v])
-runWithStack = flip S.runStateT [] . getStackT
-
--- We need to access local variables (local registers)
-class (WValue v, Monad m) => WLocals m v | m -> v where
-  setLocal :: Natural -> v -> m ()
-  getLocal :: Natural -> m v
-
-newtype WLocalsT v m a = WLocalsT { getLocalsT :: S.StateT (M.Map Natural v) m a }
-             deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (M.Map Natural v))
-
-instance {-# OVERLAPPABLE #-} (WLocals m v, MonadLayer t, Monad (t m)) => WLocals (t m) v where
-  setLocal i = upperM . setLocal i
-  getLocal = upperM . getLocal
-
-instance (WValue v, Monad m) => WLocals (WLocalsT v m) v where
-  getLocal k = do
-    locals <- S.get
-    case M.lookup k locals of
-      Just l -> return l
-      Nothing -> error "invalid program does not properly manage its locals"
-  setLocal k v = S.get >>= S.put . M.insert k v
-
-runWithLocals :: Monad m => WLocalsT v m a -> m a
-runWithLocals l = do
-  (r, _) <- S.runStateT (getLocalsT l) M.empty -- no locals initially, this will be populated upon function entry
-  return r
-
--- We need to access global variables (global registers)
-class (WValue v, Monad m) => WGlobals m v | m -> v where
-  setGlobal :: Natural -> v -> m ()
-  getGlobal :: Natural -> m v
-
-instance {-# OVERLAPPABLE #-} (WGlobals m v, MonadLayer t, Monad (t m)) => WGlobals (t m) v where
-  setGlobal i = upperM . setGlobal i
-  getGlobal = upperM . getGlobal
-
-newtype WGlobalsT v m a = WGlobalsT { getGlobalsT :: S.StateT (M.Map Natural v) m a }
-             deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans, S.MonadState (M.Map Natural v))
-
-instance (WValue v, Monad m) => WGlobals (WGlobalsT v m) v where
-  getGlobal k = do
-    globals <- S.get
-    case M.lookup k globals of
-      Just l -> return l
-      Nothing -> error "invalid program does not properly manage its globals"
-  setGlobal k v = S.get >>= S.put . M.insert k v
-
-runWithGlobals :: (WasmModule m, WValue v) => WGlobalsT v m a -> m a
-runWithGlobals l = do
-  m <- getModule
-  let globals = zipWith (\idx g -> (idx, runInitializer g)) [0..] (Wasm.globals m)
-  (r, _) <- S.runStateT (getGlobalsT l) (M.fromList globals)
-  return r
-  where runInitializer g = case Wasm.initializer g of
-          [Wasm.I32Const n] -> i32 n
-          [Wasm.I64Const n] -> i64 n
-          [Wasm.F32Const n] -> f32 n
-          [Wasm.F64Const n] -> f64 n
-          -- ideally we'd call evalExpr and take the top value of the stack, but most initializers are just const, so we specialize it for simplicity
-          _ -> error "unsupported non-const global initializer"
-
-
-data Size = Size8 | Size16 | Size32
-data Signedness = U | S
-
--- We need to access the linear memory (the heap)
-class (WValue v, Monad m) => WLinearMemory m v | m -> v where
-  -- i32.load, i64.load, f32.load, f64.load
-  load :: Wasm.ValueType -> Wasm.MemArg -> v -> m v
-  -- i32.load8_s, i32.load8_u, i32.load16_s, i32.load16_u, etc.
-  load_ :: Wasm.ValueType -> Size -> Signedness -> Wasm.MemArg -> v -> m v
-  -- i32.store, i64.store, f32.store, f64.store
-  store :: Wasm.ValueType ->  Wasm.MemArg -> (v, v) -> m ()
-  -- i32.store8, i32.store16, i64.store8, i64.store16, i64.store32
-  store_ :: Wasm.ValueType -> Size -> Wasm.MemArg -> (v, v) -> m ()
-
-instance {-# OVERLAPPABLE #-} (WLinearMemory m v, MonadLayer t, Monad (t m)) => WLinearMemory (t m) v where
-  load vt memarg = upperM . load vt memarg
-  load_ vt size signed memarg = upperM . load_ vt size signed memarg
-  store vt memarg = upperM . store vt memarg
-  store_ vt size memarg = upperM . store_ vt size memarg
-
-newtype WTopLinearMemoryT v m a = WLinearMemoryT { getLinearMemoryT :: IdentityT m a }
-  deriving (Applicative, Monad, Functor, MonadLayer, MonadTrans)
-
-instance (WValue v, Monad m) => WLinearMemory (WTopLinearMemoryT v m) v where
-  load vt _memarg _addr = return (top vt)
-  load_ vt _size _signed _memarg _addr = return (top vt)
-  store _vt _memarg _addr_v = return ()
-  store_ _vt _size _memarg _addr_v = return ()
-
-runWithSingleCellLinearMemory :: (WValue v, Monad m) => WTopLinearMemoryT v m a -> m a
-runWithSingleCellLinearMemory x = runIdentityT (getLinearMemoryT x)
-
--- TODO: try a more precise implementation where memory is a map from i32 to
--- bytes. reading an i32 makes it read 4 bytes. Bytes can be top. Reading the
--- top address returns top.
--- NOTE: memarg offset of 1 means do +1 to the address
-
-data WEsc v = Return ![v]
-            | Break !Natural ![v] -- break level and result stack
-  deriving (Eq, Ord, Show)
-
-class (Domain esc (WEsc v), Show esc) => WEscape esc v | esc -> v where
-  isReturn :: (BoolDomain b, BottomLattice b) => esc -> b
-  isBreak :: (BoolDomain b, BottomLattice b, Show b) => esc -> b
-  getBreakLevelAndStack :: esc -> [(Natural, [v])]
-  getReturnStack :: esc -> [[v]]
-
-instance (Ord v, Show v) => WEscape (S.Set (WEsc v)) v where
-  isReturn = joinMap $
-    \case Return _ -> true
-          _ -> false
-  isBreak = joinMap $
-    \case Break _ _ -> true
-          _ -> false
-  getBreakLevelAndStack s = mapMaybe extract (S.elems s)
-    where extract (Break level stack) = Just (level, stack)
-          extract _ = Nothing
-  getReturnStack s = mapMaybe extract (S.elems s)
-    where extract (Return stack) = Just stack
-          extract _ = Nothing
-
-type WMonad m v = (
-  WasmModule m, -- to access the entire module for type information
-  WValue v, -- to abstract the values
-  WLinearMemory m v, -- to represent the linear memory
-  WStack m v, -- to manipulate the stack
-  WLocals m v, -- to manipulate locals
-  WGlobals m v, -- to manipulate globals
-  MonadJoin m, -- for non-determinism for branching
-  MonadCache m,
-  MonadEscape m,
-  WEscape (Esc m) v,
-  SplitLattice (Esc m),
-  Domain (Esc m) (WEsc v),
-  MapM (Key m (WasmBody v)) (Val m [v]) m,
-  ComponentTrackingM m (Key m (WasmBody v)),
-  BottomLattice v,
-  BottomLattice (Esc m)
-  )
 
 evalBody :: WMonad m v => WasmBody v -> m [v]
 evalBody = evalBody' call'
@@ -443,7 +191,7 @@ evalInstr rec (Wasm.BrTable table def) = do
     -- check each element of table for equality
     (mjoinMap (\n -> cond (return (iRelOp Wasm.BS32 Wasm.IEq v (i32 (fromInteger (toInteger n)))))
                           (evalInstr rec (Wasm.Br n))
-                          mzero)
+                          mbottom)
       table)
     -- if no elements are equal, go do the default
     -- if all n != v comparisons are definitely true: no elements are equal (must): go to default

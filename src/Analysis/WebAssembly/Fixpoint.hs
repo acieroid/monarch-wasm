@@ -5,7 +5,7 @@ module Analysis.WebAssembly.Fixpoint (
   WasmRes
   ) where
 import Analysis.WebAssembly.Semantics (evalBody, WasmModule, WStack, WLocals, WGlobals, runWithWasmModule, runWithGlobals, WasmBody (..), FunctionIndex, runWithStack, runWithLocals, WEsc, WLinearMemory, runWithSingleCellLinearMemory)
-import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
+import Analysis.Monad (CacheT, JoinT, MapM, DependencyTrackingM, MonadDependencyTracking, WorkListM (..), IntraAnalysisT, runIntraAnalysis, CtxT, MonadCache (Key, Val), iterateWL, runWithStore, runWithMapping, runWithDependencyTracking, runWithWorkList)
 import Control.Monad.Identity
 import Language.Wasm.Structure (Module(..), Export(..), ExportDesc(..))
 import Data.Map (Map)
@@ -16,7 +16,8 @@ import Analysis.Monad.Fix (runFixT)
 import Lattice (Meetable, BottomLattice, Joinable)
 import Control.Monad.Escape (MayEscapeT)
 import Data.Set (Set)
-import Analysis.WebAssembly.Domain (WValue)
+import Domain.WebAssembly.Class (WValue)
+import Data.Typeable
 
 type IntraT m v = MonadStack '[
     MayEscapeT (Set (WEsc v)),
@@ -27,6 +28,7 @@ type IntraT m v = MonadStack '[
 
 -- InterM represents the constraints remaining after the intra (i.e., global concerns)
 type InterM m v = (
+  Typeable v,
   Meetable v,
   WasmModule m,
   WLinearMemory m v,
@@ -38,7 +40,7 @@ type InterM m v = (
   ComponentTrackingM m (WasmCmp v),
   -- DependencyTrackingM m (WasmCmp v) v, -- TODO: functions depend on read addresses
   -- TODO: functions depend on globals
-  DependencyTrackingM m (WasmCmp v) (WasmCmp v), -- functions depend on called functions
+  MonadDependencyTracking (WasmCmp v) (WasmCmp v) m, -- functions depend on called functions
   WorkListM m (WasmCmp v),
   BottomLattice v,
   Joinable v
@@ -60,7 +62,7 @@ inter m = mapM_ (\x -> add (EntryFunction x, ())) exportedFuncs >> iterateWL int
 -- Analyze a module, returning:
 -- - the resulting stack for each function
 -- - the linear memory
-analyze :: forall v . (WValue v, Meetable v, BottomLattice v, Joinable v) => Module -> (Map (WasmCmp v) (WasmRes v), Map v v)
+analyze :: forall v . (Typeable v, WValue v, Meetable v, BottomLattice v, Joinable v) => Module -> (Map (WasmCmp v) (WasmRes v), Map v v)
 analyze m = (returns, store)
   where ((((), store), returns), _) = inter @_ @v m
           & runWithStore @(Map v v) @v
